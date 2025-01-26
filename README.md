@@ -20,7 +20,7 @@ go toolchain.
 For LICENSE details of Go toolchain please consult the LICENSE file(s)
 inside the bootstrap archive. Alternatively refer to Go upstream repository.
 LICENSE file within this repository only applies to build scripts and build
-infrastructure and not necessarily the artifacts included in the release.
+ci configuration and not necessarily the artifacts included in the release.
 
 Tags in this repository intentionally have a prefix `bootstrap-*` to avoid
 being used directly by scripts or any unintended developers.

@@ -46,3 +46,64 @@ jobs:
           path: dist/${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
           if-no-files-found: error
 
+  provenance:
+    if: "${{ github.ref_type == 'tag' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) }}"
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    outputs:
+      attestation-id: "${{ steps.provenance.outputs.attestation-id }}"
+      toolchain-artifact-provenance-name: ${{ format('{0}.slsa.json', needs.build.outputs.toolchain-artifact-name) }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Generate SLSA Provenance
+        id: provenance
+        uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # ratchet:actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ needs.build.outputs.toolchain-artifact-name }}
+          subject-digest: ${{ format('sha256:{0}', needs.build.outputs.toolchain-checksum) }}
+
+      - name: Upload provenance bundle
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
+        with:
+          name: ${{ format('{0}.slsa.json', needs.build.outputs.toolchain-artifact-name) }}
+          path: "${{ steps.provenance.outputs.bundle-path }}"
+          if-no-files-found: error
+
+  release:
+    if: "${{ github.ref_type == 'tag' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) }}"
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - provenance
+    permissions:
+      attestations: read
+      contents: write
+      id-token: none
+    steps:
+      - name: Download Artifacts
+        id: toolchain
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # ratchet:actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Using gh (which is written in go) is okay here as it is executed after building the
+      # go toolchain and signing slsa provenance in previous jobs and has no access to OIDC
+      # tokens which are required to mint sigstore certificates.
+      - name: Create a Release
+        if: ${{ github.ref_type == 'tag' }}
+        id: release
+        run: >-
+          gh release create
+          --repo ${{ github.repository }}
+          --title "Go Bootstrap Toolchain ${{ needs.build.outputs.toolchain-version }}"
+          ${{ github.ref_name }}
+          dist/${{ needs.build.outputs.toolchain-artifact-name }}
+          dist/${{ needs.build.outputs.toolchain-artifact-sha256-name }}
+          dist/${{ needs.provenance.outputs.toolchain-artifact-provenance-name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
