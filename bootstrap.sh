@@ -186,11 +186,12 @@ function main() {
         shift
     done
 
-    # https://go.dev/dl
-    local bootstrap_dist_expected_sha="0fc88d966d33896384fbde56e9a8d80a305dc17a9f48f1832e061724b1719991"
-
-    if [[ $(id -u) == "0" && ${GITHUB_ACTIONS} != "true" ]]; then
-        log_abort "Go Bootstrapping script MUST NOT be run as root"
+    local systemd_instance_flag="--user"
+    if [[ $(id -u) == "0" ]]; then
+        log_warning "Go Bootstrapping script SHOULD NOT be run as root"
+        systemd_instance_flag="--system"
+    else
+        log_info "Using systemd user instance"
     fi
 
     if [[ $clean == "true" ]]; then
@@ -273,7 +274,7 @@ function main() {
         log_notice "----------------------------------------------------------"
         if systemd-run \
             --no-ask-password \
-            --user \
+            "${systemd_instance_flag}" \
             --collect \
             --scope \
             --unit "go-bootstrap-builder.scope" \
@@ -293,7 +294,7 @@ function main() {
         log_notice "----------------------------------------------------------"
         if systemd-run \
             --no-ask-password \
-            --user \
+            "${systemd_instance_flag}" \
             --collect \
             --scope \
             --unit "go-bootstrap-builder.scope" \
@@ -313,7 +314,7 @@ function main() {
         log_notice "----------------------------------------------------------"
         if systemd-run \
             --no-ask-password \
-            --user \
+            "${systemd_instance_flag}" \
             --collect \
             --scope \
             --unit "go-bootstrap-builder.scope" \
@@ -334,7 +335,7 @@ function main() {
         log_notice "----------------------------------------------------------"
         if systemd-run \
             --no-ask-password \
-            --user \
+            "${systemd_instance_flag}" \
             --collect \
             --scope \
             --unit "go-bootstrap-builder.scope" \
@@ -349,29 +350,38 @@ function main() {
             log_abort "Failed to build Go 1.22 toolchain"
         fi
 
-        log_info "Check Go VERSION file"
-        local version_line
-        read -r version_line <sources/go1.22/VERSION
-        if [[ -z ${version_line} ]]; then
+        # Verify distpack hash matches the one published by Go project for Go 1.22
+        log_info "Check Go 1.22 VERSION file"
+        local go_122_version_line
+        read -r go_122_version_line <sources/go1.22/VERSION
+        if [[ -z ${go_122_version_line} ]]; then
             log_abort "Failed to read version file - sources/go1.22/VERSION"
         else
-            log_notice "Go Version - ${version_line}"
+            log_notice "Go 1.22 Version - ${go_122_version_line}"
         fi
 
-        log_info "Verify build reproducibility "
-        if [[ ! -f "sources/go1.22/pkg/distpack/${version_line}.linux-amd64.tar.gz" ]]; then
+        log_info "Verify Go 1.22 build reproducibility "
+        if [[ ! -f "sources/go1.22/pkg/distpack/${go_122_version_line}.linux-amd64.tar.gz" ]]; then
             log_abort "Build script did not generate distpack archive"
         fi
 
-        local go_bootstrap_checksum
-        go_bootstrap_checksum="$(sha256sum "sources/go1.22/pkg/distpack/${version_line}.linux-amd64.tar.gz")"
-        log_info "Expected checksum : ${bootstrap_dist_expected_sha}"
-        log_info "Actual checksum   : ${go_bootstrap_checksum%% *}"
-        if [[ ${bootstrap_dist_expected_sha} == "${go_bootstrap_checksum%% *}" ]]; then
-            log_success "Checksums match with official releases, build is reproducible"
+        local go_122_expected_checksum="0fc88d966d33896384fbde56e9a8d80a305dc17a9f48f1832e061724b1719991"
+
+        local go_122_distpack_checksum
+        go_122_distpack_checksum="$(sha256sum "sources/go1.22/pkg/distpack/${go_122_version_line}.linux-amd64.tar.gz")"
+        log_info "Expected checksum : ${go_122_expected_checksum}"
+        log_info "Actual checksum   : ${go_122_distpack_checksum%% *}"
+        if [[ ${go_122_expected_checksum} == "${go_122_distpack_checksum%% *}" ]]; then
+            log_success "Go 1.22 Checksums match with official releases, build is reproducible"
         else
-            log_abort "Checksum DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
+            log_abort "Go 1.22 Checksum DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
         fi
+
+
+        # Checksum of release artifacts from previous reproducible go build.
+        # ---------------------------------------------------------------
+        local version_line="${go_122_version_line}"
+        local bootstrap_dist_expected_sha="${go_122_expected_checksum}"
 
         # Copy distpack to /dist and add bootstrap- prefix to filename.
         if [[ ! -e dist ]]; then
