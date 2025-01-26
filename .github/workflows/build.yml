@@ -21,6 +21,7 @@ jobs:
       toolchain-checksum: ${{ steps.bootstrap.outputs.toolchain-checksum }}
       toolchain-artifact-name: ${{ steps.bootstrap.outputs.toolchain-artifact-name }}
       toolchain-artifact-sha256-name: ${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
+      toolchain-artifact-provenance-name: ${{ format('{0}.slsa.json', steps.bootstrap.outputs.toolchain-artifact-name) }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
@@ -51,9 +52,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - build
-    outputs:
-      attestation-id: "${{ steps.provenance.outputs.attestation-id }}"
-      toolchain-artifact-provenance-name: ${{ format('{0}.slsa.json', needs.build.outputs.toolchain-artifact-name) }}
     permissions:
       contents: read
       id-token: write
@@ -66,11 +64,14 @@ jobs:
           subject-name: ${{ needs.build.outputs.toolchain-artifact-name }}
           subject-digest: ${{ format('sha256:{0}', needs.build.outputs.toolchain-checksum) }}
 
+      - name: Rename provenance file
+        run: mv ${{ steps.provenance.outputs.bundle-path }} ${{ needs.build.outputs.toolchain-artifact-provenance-name }}
+
       - name: Upload provenance bundle
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
         with:
-          name: ${{ format('{0}.slsa.json', needs.build.outputs.toolchain-artifact-name) }}
-          path: "${{ steps.provenance.outputs.bundle-path }}"
+          name: ${{ needs.build.outputs.toolchain-artifact-provenance-name }}
+          path: ${{ needs.build.outputs.toolchain-artifact-provenance-name }}
           if-no-files-found: error
 
   release:
@@ -91,8 +92,11 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: List Artifacts
+        run: ls -Al dist
+
       # Using gh (which is written in go) is okay here as it is executed after building the
-      # go toolchain and signing slsa provenance in previous jobs and has no access to OIDC
+      # go toolchain and signing SLSA provenance in previous jobs and has no access to OIDC
       # tokens which are required to mint sigstore certificates.
       - name: Create a Release
         if: ${{ github.ref_type == 'tag' }}
@@ -104,6 +108,6 @@ jobs:
           ${{ github.ref_name }}
           dist/${{ needs.build.outputs.toolchain-artifact-name }}
           dist/${{ needs.build.outputs.toolchain-artifact-sha256-name }}
-          dist/${{ needs.provenance.outputs.toolchain-artifact-provenance-name }}
+          dist/${{ needs.build.outputs.toolchain-artifact-provenance-name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

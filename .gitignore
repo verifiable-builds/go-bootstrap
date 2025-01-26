@@ -208,3 +208,6 @@ terraform.rc
 SHA256SUMS
 SHA256SUMS.txt
 *.sha256
+
+# VS Code configs
+.vscode/settings.json
