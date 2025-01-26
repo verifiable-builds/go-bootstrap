@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3.39"
+tasks:
+  default:
+    cmds:
+      - cmd: task --list
+        silent: true
+  bootstrap:
+    desc: "Bootstrap Go toolchain"
+    cmds:
+      - ./bootstrap.sh --clean --build --github-actions
+  clean:
+    desc: "Clean build artifacts"
+    cmds:
+      - ./bootstrap.sh --clean
+  pin-actions:
+    desc: "Pin GitHub Actions"
+    cmds:
+      - cmd: >-
+          podman
+          run
+          --rm
+          --mount "type=bind,src={{.ROOT_DIR}}/.github/workflows,target=/workflows"
+          --label "go-bootstrap.builder=true"
+          -w /workflows
+          ghcr.io/sethvargo/ratchet:latest
+          pin build.yml

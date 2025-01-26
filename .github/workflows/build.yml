@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: build
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      toolchain-version: ${{ steps.bootstrap.outputs.toolchain-version }}
+      toolchain-checksum: ${{ steps.bootstrap.outputs.toolchain-checksum }}
+      toolchain-artifact-name: ${{ steps.bootstrap.outputs.toolchain-artifact-name }}
+      toolchain-artifact-sha256-name: ${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Bootstrap
+        id: bootstrap
+        run: ./bootstrap.sh --build --clean
+
+      - name: Upload Toolchain
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
+        with:
+          name: ${{ steps.bootstrap.outputs.toolchain-artifact-name }}
+          path: dist/${{ steps.bootstrap.outputs.toolchain-artifact-name }}
+          if-no-files-found: error
+
+      - name: Upload SHA256 checksum file
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
+        with:
+          name: ${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
+          path: dist/${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
+          if-no-files-found: error
+
