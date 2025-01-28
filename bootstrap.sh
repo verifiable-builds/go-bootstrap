@@ -109,11 +109,11 @@ function __exit_handler() {
     if [[ ${__GO_BOOTSTRAP_BUILDER_CLEANUP:-false} != "false" ]]; then
         declare -r builder_unit="go-bootstrap-builder.scope"
         if systemctl --user --quiet is-active "${builder_unit}"; then
-            log_warning "Killing existing builder (${builder_unit})"
-            if systemctl --user kill "${builder_unit}" 2>&1 | log_tail "clean"; then
-                log_info "Successfully killed existing builder - ${builder_unit}"
+            log_warning "Stopping existing builder (${builder_unit})"
+            if systemctl --user stop "${builder_unit}" 2>&1 | log_tail "clean"; then
+                log_info "Successfully stopped existing builder - ${builder_unit}"
             else
-                log_error "Failed to kill existing builder - ${builder_unit}"
+                log_error "Failed to stop existing builder - ${builder_unit}"
             fi
         else
             log_debug "Builder is not running - ${builder_unit}"
@@ -126,6 +126,150 @@ function has_command() {
         return 0
     else
         return 1
+    fi
+}
+
+# Builds a compiler stage previous bootstrap stage.
+function build_stage() {
+    local go_root
+    local go_root_bootstrap
+    local go_distpack_expected_sha256
+    local go_dist_flags
+    local systemd_instance="user"
+    local cgo_enabled
+    local go_ld_flags
+
+    while [[ ${1} != "" ]]; do
+        case ${1} in
+        --go-root)
+            shift
+            go_root="${1}"
+            ;;
+        --go-root-bootstrap)
+            shift
+            go_root_bootstrap="${1}"
+            ;;
+        --distpack-expected-sha256)
+            shift
+            go_distpack_expected_sha256="${1}"
+            ;;
+        --systemd-instance)
+            shift
+            systemd_instance="${1}"
+            ;;
+        --go-dist-flags)
+            shift
+            go_dist_flags="${1}"
+            ;;
+        --go-ld-flags)
+            shift
+            go_ld_flags="${1}"
+            ;;
+        --disable-cgo)
+            cgo_enabled=0
+            ;;
+        *)
+            log_error "Invalid argument for build_stage $*"
+            exit 1
+            ;;
+        esac
+        shift
+    done
+
+    local bootstrap_tool
+    local go_root_bootstrap_path
+    if [[ $go_root_bootstrap == "" ]]; then
+        bootstrap_tool="gcc"
+    else
+        bootstrap_tool="${go_root_bootstrap}"
+        go_root_bootstrap_path="${PWD}/sources/${go_root_bootstrap}"
+    fi
+
+    log_notice "----------------------------------------------------------"
+    log_notice "Build ${go_root} using ${bootstrap_tool}"
+    log_notice "----------------------------------------------------------"
+
+    # We use --scope units because github actions runs its jobs and runner
+    # under a single system unit and systemd-run --user will behave poorly
+    declare -r builder_unit="go-bootstrap-builder.scope"
+
+    # Cleanup any previous builders.
+    if systemctl --user --quiet is-active "${builder_unit}"; then
+        log_warning "Killing existing builder - ${builder_unit}"
+        if systemctl --user kill "${builder_unit}" 2>&1 | log_tail "clean"; then
+            log_info "Successfully killed existing builder - ${builder_unit}"
+        else
+            log_abort "Failed to kill existing builder - ${builder_unit}"
+        fi
+    fi
+
+    local go_version_line
+    local go_version_file="${PWD}/sources/${go_root}/VERSION"
+    if [[ -f ${go_version_file} ]]; then
+        read -r go_version_line <"${go_version_file:-/dev/null}"
+        if [[ -z ${go_version_line} ]]; then
+            log_abort "Failed to read version file - ${go_version_file}"
+        fi
+    else
+        log_abort "${go_root} VERSION file ($go_version_file) not found"
+    fi
+
+    local systemd_instance_flag="--user"
+    if [[ ${systemd_instance} == "system" ]]; then
+        systemd_instance_flag="--system"
+    fi
+
+    local go_root_path="${PWD}/sources/${go_root}"
+    log_info "VERSION          : ${go_version_line}"
+    log_info "GOROOT           : ${go_root_path}"
+    log_info "GOROOT_BOOTSTRAP : ${go_root_bootstrap_path}"
+    log_info "CGO_ENABLED      : ${cgo_enabled}"
+    log_info "GO_DISTFLAGS     : ${go_dist_flags}"
+    log_info "GO_LDFLAGS       : ${go_ld_flags}"
+
+    if systemd-run \
+        --no-ask-password \
+        "${systemd_instance_flag}" \
+        --collect \
+        --scope \
+        --unit "go-bootstrap-builder.scope" \
+        -p RuntimeMaxSec=15m \
+        -E PATH="/usr/bin:/usr/sbin" \
+        -E GOROOT="${go_root_path}" \
+        -E GOROOT_BOOTSTRAP="${go_root_bootstrap_path}" \
+        -E GO_DISTFLAGS="${go_dist_flags}" \
+        -E CGO_ENABLED="${cgo_enabled}" \
+        -E GO_LDFLAGS="${go_ld_flags}" \
+        --working-directory="${go_root_path}/src" \
+        bash make.bash 2>&1 | log_tail "${go_root}"; then
+        log_success "Successfully built ${go_root} toolchain"
+    else
+        log_abort "Failed to build ${go_root} toolchain"
+    fi
+
+    if [[ -n ${go_distpack_expected_sha256} ]]; then
+        log_info "Verify ${go_root} build is reproducible"
+        if [[ ! -f "${go_root_path}/pkg/distpack/${go_version_line}.linux-amd64.tar.gz" ]]; then
+            log_abort "Build script did not generate distpack archive"
+        fi
+
+        local go_distpack_checksum
+        local go_distpack_name="${go_version_line}.linux-amd64.tar.gz"
+        local go_distpack_path="sources/${go_root}/pkg/distpack/${go_distpack_name}"
+        go_distpack_checksum="$(sha256sum "$go_distpack_path")"
+        log_info "Expected checksum : ${go_distpack_expected_sha256}"
+        log_info "Actual checksum   : ${go_distpack_checksum%% *}"
+        if [[ ${go_distpack_expected_sha256} == "${go_distpack_checksum%% *}" ]]; then
+            declare -g __GO_BUILD_VERSION="${go_version_line}"
+            declare -g __GO_BUILD_DISTPACK_SHA256="${go_distpack_expected_sha256}"
+            declare -g __GO_BUILD_DISTPACK_NAME="${go_distpack_name}"
+            declare -g __GO_BUILD_DISTPACK_PATH="${go_distpack_path}"
+            log_success "${go_root} checksums match with official releases, build is reproducible"
+        else
+            log_abort "${go_root} checksums DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
+        fi
+    else
+        log_notice "Skipped reproducibility checks for ${go_root}"
     fi
 }
 
@@ -186,14 +330,6 @@ function main() {
         shift
     done
 
-    local systemd_instance_flag="--user"
-    if [[ $(id -u) == "0" ]]; then
-        log_warning "Go Bootstrapping script SHOULD NOT be run as root"
-        systemd_instance_flag="--system"
-    else
-        log_info "Using systemd user instance"
-    fi
-
     if [[ $clean == "true" ]]; then
         log_notice "----------------------------------------------------------"
         log_notice "Cleaning prebuilt files"
@@ -212,6 +348,8 @@ function main() {
             "sources/go1.20/pkg"
             "sources/go1.22/bin"
             "sources/go1.22/pkg"
+            "sources/go1.24/bin"
+            "sources/go1.24/pkg"
             "dist"
         )
 
@@ -241,147 +379,116 @@ function main() {
             log_success "Running on supported platform - linux/amd64"
         fi
 
-        if ! has_command "gcc"; then
-            log_abort "Missing command gcc"
+        # Check if required commands are present.
+        declare -a commands=(
+            "systemd-run" # systemd
+            "gcc"         # build-essentials
+            # "unshare"     # util-linux
+            # "mount"       # coreutils
+        )
+
+        declare -a missing_commands
+        for command in "${commands[@]}"; do
+            if ! has_command "$command"; then
+                ((++errs))
+                missing_commands+=("$command")
+            fi
+        done
+
+        if [[ ${#missing_commands[@]} -gt 0 ]]; then
+            log_abort "Following commands are missing - ${missing_commands[*]}"
         fi
 
-        # Avoid checking for systemctl as it may be stubbed.
-        if ! has_command "systemd-run"; then
-            log_abort "Missing command systemd-run"
+        # Check if user namespaces are supported.
+        local user_ns
+
+        local systemd_instance="user"
+        if [[ $(id -u) == "0" ]]; then
+            log_warning "Go Bootstrapping script SHOULD NOT be run as root"
+            systemd_instance="system"
+        else
+            log_info "Using systemd user instance"
         fi
 
         # Indicate builders may have to be cleaned up.
         declare -g __GO_BOOTSTRAP_BUILDER_CLEANUP="true"
-        declare -r __GO_BUILDER_ROOT="$(pwd)"
 
         # We use --scope units because github actions runs its jobs and runner
         # under a single system unit and systemd-run --user will behave poorly
         declare -r builder_unit="go-bootstrap-builder.scope"
 
-        # Cleanup any leftover builders.
-        if systemctl --user --quiet is-active "${builder_unit}"; then
-            log_warning "Killing existing builder - ${builder_unit}"
-            if systemctl --user kill "${builder_unit}" 2>&1 | log_tail "clean"; then
-                log_info "Successfully killed existing builder - ${builder_unit}"
-            else
-                log_abort "Failed to kill existing builder - ${builder_unit}"
-            fi
+        # Clear various settings that would leak into defaults
+        # in the toolchain and change the generated binaries.
+        unset GOROOT
+        unset GOROOT_BOOTSTRAP
+        unset GOPROXY
+        unset GOVCS
+        unset GOTOOLDIR
+        unset GOTOOLDIR
+        unset CC_FOR_TARGET
+        unset CGO_ENABLED
+        unset CXX
+        unset CXX_FOR_TARGET
+        unset GO386
+        unset GOAMD64
+        unset GOARM
+        unset GOBIN
+        unset GOEXPERIMENT
+        unset GOMIPS64
+        unset GOMIPS
+        unset GOPATH
+        unset GOPPC64
+        unset GOROOT_FINAL
+        unset GO_EXTLINK_ENABLED
+        unset GO_GCFLAGS
+        unset GO_LDFLAGS
+        unset GO_LDSO
+        unset PKG_CONFIG
+
+        # Keey using local toolchain for bootstrapping.
+        export GOTOOLCHAIN="local"
+
+        # Build Go 1.4 as static binaries.
+        build_stage \
+            --systemd-instance "${systemd_instance}" \
+            --go-root "go1.4" \
+            --go-dist-flags "-s"
+
+        # Using Go 1.4 Build Go 1.17
+        build_stage \
+            --systemd-instance "${systemd_instance}" \
+            --go-root "go1.17" \
+            --go-root-bootstrap "go1.4" \
+            --disable-cgo \
+            --go-ld-flags '-s'
+
+        # Using Go 1.17 Build Go 1.20
+        build_stage \
+            --systemd-instance "${systemd_instance}" \
+            --go-root "go1.20" \
+            --go-root-bootstrap "go1.17" \
+            --disable-cgo \
+            --go-ld-flags '-s'
+
+        # Using Go 1.20 Build Go 1.22 and generate distpack
+        build_stage \
+            --systemd-instance "${systemd_instance}" \
+            --go-root "go1.22" \
+            --go-root-bootstrap "go1.20" \
+            --distpack-expected-sha256 0fc88d966d33896384fbde56e9a8d80a305dc17a9f48f1832e061724b1719991 \
+            --go-dist-flags "-distpack"
+
+        # Using Go 1.22 Build Go 1.24 and generate distpack
+        build_stage \
+            --systemd-instance "${systemd_instance}" \
+            --go-root "go1.24" \
+            --go-root-bootstrap "go1.22" \
+            --distpack-expected-sha256 3835e217efb30c6ace65fcb98cb8f61da3429bfa9e3f6bb4e5e3297ccfc7d1a4 \
+            --go-dist-flags "-distpack"
+
+        if [[ -z ${__GO_BUILD_DISTPACK_PATH} || -z ${__GO_BUILD_DISTPACK_NAME} || -z ${__GO_BUILD_DISTPACK_SHA256} || -z ${__GO_BUILD_VERSION} ]]; then
+            log_abort "Build did not set required __GO_BUILD_* global variables"
         fi
-
-        # Build go1.4
-        log_notice "----------------------------------------------------------"
-        log_notice "Build Go 1.4 using gcc"
-        log_notice "----------------------------------------------------------"
-        if systemd-run \
-            --no-ask-password \
-            "${systemd_instance_flag}" \
-            --collect \
-            --scope \
-            --unit "go-bootstrap-builder.scope" \
-            -p RuntimeMaxSec=15m \
-            -E PATH="/usr/bin:/usr/sbin" \
-            -E GOROOT="${PWD}/sources/go1.4" \
-            -E GOROOT_BOOTSTRAP="" \
-            --working-directory="${PWD}/sources/go1.4/src" \
-            bash make.bash 2>&1 | log_tail "go1.4"; then
-            log_success "Successfully built Go 1.4 toolchain"
-        else
-            log_abort "Failed to build Go 1.4 toolchain"
-        fi
-
-        log_notice "----------------------------------------------------------"
-        log_notice "Build Go 1.17 using go1.4 as bootstrap toolchain"
-        log_notice "----------------------------------------------------------"
-        if systemd-run \
-            --no-ask-password \
-            "${systemd_instance_flag}" \
-            --collect \
-            --scope \
-            --unit "go-bootstrap-builder.scope" \
-            -p RuntimeMaxSec=15m \
-            -E PATH="/usr/bin:/usr/sbin" \
-            -E GOROOT="${PWD}/sources/go1.17" \
-            -E GOROOT_BOOTSTRAP="${PWD}/sources/go1.4" \
-            --working-directory="${PWD}/sources/go1.17/src" \
-            bash make.bash 2>&1 | log_tail "go1.17"; then
-            log_success "Successfully built Go 1.17 toolchain"
-        else
-            log_abort "Failed to build Go 1.17 toolchain"
-        fi
-
-        log_notice "----------------------------------------------------------"
-        log_notice "Build Go 1.20 using go1.17 as bootstrap toolchain"
-        log_notice "----------------------------------------------------------"
-        if systemd-run \
-            --no-ask-password \
-            "${systemd_instance_flag}" \
-            --collect \
-            --scope \
-            --unit "go-bootstrap-builder.scope" \
-            -p RuntimeMaxSec=15m \
-            -E PATH="/usr/bin:/usr/sbin" \
-            -E GOROOT="${PWD}/sources/go1.20" \
-            -E GOROOT_BOOTSTRAP="${PWD}/sources/go1.17" \
-            --working-directory="${PWD}/sources/go1.20/src" \
-            bash make.bash 2>&1 | log_tail "go1.20"; then
-            log_success "Successfully built Go 1.20 toolchain"
-        else
-            log_abort "Failed to build Go 1.20 toolchain"
-        fi
-
-        # Go 1.21 and later are perfectly reproducible.
-        log_notice "----------------------------------------------------------"
-        log_notice "Build Go 1.22 using go1.20 as bootstrap toolchain"
-        log_notice "----------------------------------------------------------"
-        if systemd-run \
-            --no-ask-password \
-            "${systemd_instance_flag}" \
-            --collect \
-            --scope \
-            --unit "go-bootstrap-builder.scope" \
-            -p RuntimeMaxSec=15m \
-            -E PATH="/usr/bin:/usr/sbin" \
-            -E GOROOT="${PWD}/sources/go1.22" \
-            -E GOROOT_BOOTSTRAP="${PWD}/sources/go1.20" \
-            --working-directory="${PWD}/sources/go1.22/src" \
-            bash make.bash -distpack 2>&1 | log_tail "go1.22"; then
-            log_success "Successfully built Go 1.22 toolchain"
-        else
-            log_abort "Failed to build Go 1.22 toolchain"
-        fi
-
-        # Verify distpack hash matches the one published by Go project for Go 1.22
-        log_info "Check Go 1.22 VERSION file"
-        local go_122_version_line
-        read -r go_122_version_line <sources/go1.22/VERSION
-        if [[ -z ${go_122_version_line} ]]; then
-            log_abort "Failed to read version file - sources/go1.22/VERSION"
-        else
-            log_notice "Go 1.22 Version - ${go_122_version_line}"
-        fi
-
-        log_info "Verify Go 1.22 build reproducibility "
-        if [[ ! -f "sources/go1.22/pkg/distpack/${go_122_version_line}.linux-amd64.tar.gz" ]]; then
-            log_abort "Build script did not generate distpack archive"
-        fi
-
-        local go_122_expected_checksum="0fc88d966d33896384fbde56e9a8d80a305dc17a9f48f1832e061724b1719991"
-
-        local go_122_distpack_checksum
-        go_122_distpack_checksum="$(sha256sum "sources/go1.22/pkg/distpack/${go_122_version_line}.linux-amd64.tar.gz")"
-        log_info "Expected checksum : ${go_122_expected_checksum}"
-        log_info "Actual checksum   : ${go_122_distpack_checksum%% *}"
-        if [[ ${go_122_expected_checksum} == "${go_122_distpack_checksum%% *}" ]]; then
-            log_success "Go 1.22 Checksums match with official releases, build is reproducible"
-        else
-            log_abort "Go 1.22 Checksum DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
-        fi
-
-
-        # Checksum of release artifacts from previous reproducible go build.
-        # ---------------------------------------------------------------
-        local version_line="${go_122_version_line}"
-        local bootstrap_dist_expected_sha="${go_122_expected_checksum}"
 
         # Copy distpack to /dist and add bootstrap- prefix to filename.
         if [[ ! -e dist ]]; then
@@ -390,18 +497,15 @@ function main() {
             fi
         fi
 
-        local distpack_artifact_name="bootstrap-${version_line}-linux-amd64.tar.gz"
-        if cp \
-            "sources/go1.22/pkg/distpack/${version_line}.linux-amd64.tar.gz" \
-            "dist/${distpack_artifact_name}" 2>&1 | log_tail "copy"; then
-            log_success "Copied distpack archive to dist/${distpack_artifact_name}"
+        if cp "${__GO_BUILD_DISTPACK_PATH}" "dist/${__GO_BUILD_DISTPACK_NAME}" 2>&1 | log_tail "copy"; then
+            log_success "Copied distpack archive to dist/${__GO_BUILD_DISTPACK_NAME}"
         else
-            log_abort "Failed to copy distpack archive to dist/${distpack_artifact_name}"
+            log_abort "Failed to copy distpack archive to dist/${__GO_BUILD_DISTPACK_NAME}"
         fi
 
         # Generate checksum file.
-        log_info "SHA256 checksum is saved to ${distpack_artifact_name}.sha256"
-        if ! printf "%s" "${bootstrap_dist_expected_sha}" >"dist/${distpack_artifact_name}.sha256"; then
+        log_info "SHA256 checksum is saved to ${__GO_BUILD_DISTPACK_NAME}.sha256"
+        if ! printf "%s" "${__GO_BUILD_DISTPACK_SHA256}" >"dist/${__GO_BUILD_DISTPACK_NAME}.sha256"; then
             log_abort "Failed to generate SHA256 checksum file"
         fi
 
@@ -409,20 +513,17 @@ function main() {
         if [[ ${GITHUB_ACTIONS} == "true" ]]; then
             log_info "Setting github actions outputs"
 
-            local base64_subjects
-            base64_subjects="$(printf "%s  %s" "${bootstrap_dist_expected_sha}" "${distpack_artifact_name}" | base64 -w 0)"
-
-            log_info "toolchain-version=${version_line}"
-            log_info "toolchain-checksum=${bootstrap_dist_expected_sha}"
-            log_info "toolchain-artifact-name=${distpack_artifact_name}"
-            log_info "toolchain-artifact-sha256-name=${distpack_artifact_name}.sha256"
+            log_info "toolchain-version=${__GO_BUILD_VERSION}"
+            log_info "toolchain-checksum=${__GO_BUILD_DISTPACK_SHA256}"
+            log_info "toolchain-artifact-name=${__GO_BUILD_DISTPACK_NAME}"
+            log_info "toolchain-artifact-sha256-name=${__GO_BUILD_DISTPACK_NAME}.sha256"
 
             if [[ -n ${GITHUB_OUTPUT} ]]; then
                 {
-                    echo "toolchain-version=${version_line}"
-                    echo "toolchain-checksum=${bootstrap_dist_expected_sha}"
-                    echo "toolchain-artifact-name=${distpack_artifact_name}"
-                    echo "toolchain-artifact-sha256-name=${distpack_artifact_name}.sha256"
+                    echo "toolchain-version=${__GO_BUILD_VERSION}"
+                    echo "toolchain-checksum=${__GO_BUILD_DISTPACK_SHA256}"
+                    echo "toolchain-artifact-name=${__GO_BUILD_DISTPACK_NAME}"
+                    echo "toolchain-artifact-sha256-name=${__GO_BUILD_DISTPACK_NAME}.sha256"
                 } >>"${GITHUB_OUTPUT}"
             fi
         fi
