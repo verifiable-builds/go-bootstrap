@@ -19,3 +19,8 @@
 	url = https://go.googlesource.com/go
 	branch = release-branch.go1.22
 	shallow = true
+[submodule "sources/go1.24"]
+	path = sources/go1.24
+	url = https://go.googlesource.com/go
+	branch = release-branch.go1.24
+	shallow = true
