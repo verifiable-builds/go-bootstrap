@@ -129,7 +129,7 @@ function has_command() {
     fi
 }
 
-# Builds a compiler stage previous bootstrap stage.
+# Builds a compiler stage using previous stage or gcc.
 function build_stage() {
     local go_root
     local go_root_bootstrap
@@ -195,11 +195,11 @@ function build_stage() {
 
     # Cleanup any previous builders.
     if systemctl --user --quiet is-active "${builder_unit}"; then
-        log_warning "Killing existing builder - ${builder_unit}"
-        if systemctl --user kill "${builder_unit}" 2>&1 | log_tail "clean"; then
+        log_warning "Stopping existing builder - ${builder_unit}"
+        if systemctl --user stop "${builder_unit}" 2>&1 | log_tail "clean"; then
             log_info "Successfully killed existing builder - ${builder_unit}"
         else
-            log_abort "Failed to kill existing builder - ${builder_unit}"
+            log_abort "Failed to stop existing builder - ${builder_unit}"
         fi
     fi
 
@@ -336,20 +336,26 @@ function main() {
         log_notice "----------------------------------------------------------"
         declare -a clean_list
         clean_list=(
+            "sources/go1.4/src/runtime/runtime_defs.go" # from make.bash in go1.4
             "sources/go1.4/bin"
             "sources/go1.4/pkg"
             "sources/go1.4/src/runtime/zasm_linux_amd64.h"
             "sources/go1.4/src/runtime/zgoarch_amd64.go"
             "sources/go1.4/src/runtime/zgoos_linux.go"
             "sources/go1.4/src/runtime/zsys_linux_amd64.s"
+            "sources/go1.4/src/cmd/dist/dist"
             "sources/go1.17/bin"
             "sources/go1.17/pkg"
+            "sources/go1.17/src/cmd/dist/dist"
             "sources/go1.20/bin"
             "sources/go1.20/pkg"
+            "sources/go1.20/src/cmd/dist/dist"
             "sources/go1.22/bin"
             "sources/go1.22/pkg"
+            "sources/go1.22/src/cmd/dist/dist"
             "sources/go1.24/bin"
             "sources/go1.24/pkg"
+            "sources/go1.24/src/cmd/dist/dist"
             "dist"
         )
 
