@@ -489,7 +489,7 @@ function main() {
             --systemd-instance "${systemd_instance}" \
             --go-root "go1.24" \
             --go-root-bootstrap "go1.22" \
-            --distpack-expected-sha256 3835e217efb30c6ace65fcb98cb8f61da3429bfa9e3f6bb4e5e3297ccfc7d1a4 \
+            --distpack-expected-sha256 dea9ca38a0b852a74e81c26134671af7c0fbe65d81b0dc1c5bfe22cf7d4c8858 \
             --go-dist-flags "-distpack"
 
         if [[ -z ${__GO_BUILD_DISTPACK_PATH} || -z ${__GO_BUILD_DISTPACK_NAME} || -z ${__GO_BUILD_DISTPACK_SHA256} || -z ${__GO_BUILD_VERSION} ]]; then

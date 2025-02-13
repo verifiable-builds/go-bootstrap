@@ -13,15 +13,3 @@ tasks:
     desc: "Clean build artifacts"
     cmds:
       - ./bootstrap.sh --clean
-  pin-actions:
-    desc: "Pin GitHub Actions"
-    cmds:
-      - cmd: >-
-          podman
-          run
-          --rm
-          --mount "type=bind,src={{.ROOT_DIR}}/.github/workflows,target=/workflows"
-          --label "go-bootstrap.builder=true"
-          -w /workflows
-          ghcr.io/sethvargo/ratchet:latest
-          pin build.yml
