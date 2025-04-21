@@ -9,8 +9,8 @@ This repository is used for building go bootstrap toolchain with SLSA provenance
 This repository uses git submodules to point to go source repositories.
 
 Bootstrap toolchain is **only built for linux/amd64**. It does not build for
-_any_ other architectures, as go1.21 or later can be easily cross compiled
-without any issues in a _fully reproducible_ manner.
+any other architectures, as go1.21 or later can be easily cross compiled
+without any issues in a fully reproducible manner.
 
 This project and its release assets SHOULD ONLY be used for bootstrapping the
 go toolchain.
@@ -25,9 +25,9 @@ ci configuration and not necessarily the artifacts included in the release.
 Tags in this repository intentionally have a prefix `bootstrap-*` to avoid
 being used directly by scripts or any unintended developers.
 
-This repository _does not_ make use of `slsa-framework/slsa-github-generator`
-to ensure that this repository _only depends on official GitHub actions_
+This repository does not make use of `slsa-framework/slsa-github-generator`
+to ensure that this repository only depends on official GitHub actions
 and no third party actions are involved. While SLSA build provenance is
 only L2 (due to signing workflow being within same repo) any issues from
 lower isolation are mitigated as go toolchains are bit-for-bit reproducible.
-Bootstrap script also _does not_ make use of any tools or actions written in Go.
+Bootstrap script also does not make use of any tools or actions written in Go.
