@@ -13,43 +13,39 @@ permissions: {}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
       toolchain-version: ${{ steps.bootstrap.outputs.toolchain-version }}
+      toolchain-filename: ${{ steps.bootstrap.outputs.toolchain-filename }}
       toolchain-checksum: ${{ steps.bootstrap.outputs.toolchain-checksum }}
-      toolchain-artifact-name: ${{ steps.bootstrap.outputs.toolchain-artifact-name }}
-      toolchain-artifact-sha256-name: ${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
-      toolchain-artifact-provenance-name: ${{ format('{0}.slsa.json', steps.bootstrap.outputs.toolchain-artifact-name) }}
+      toolchain-artifact-id: ${{ steps.upload-toolchain.outputs.artifact-id }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
         with:
+          submodules: false
           persist-credentials: false
-          submodules: true
 
       - name: Bootstrap
         id: bootstrap
-        run: ./bootstrap.sh --build --clean
+        run: ./go-bootstrap.sh --clean --build --github-actions
 
-      - name: Upload Toolchain
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
+      - name: Upload Toolchain & Checksum file
+        id: upload-toolchain
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4
         with:
-          name: ${{ steps.bootstrap.outputs.toolchain-artifact-name }}
-          path: dist/${{ steps.bootstrap.outputs.toolchain-artifact-name }}
+          path: dist/
+          name: toolchain
           if-no-files-found: error
-
-      - name: Upload SHA256 checksum file
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
-        with:
-          name: ${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
-          path: dist/${{ steps.bootstrap.outputs.toolchain-artifact-sha256-name }}
-          if-no-files-found: error
+          compression-level: 0
 
   provenance:
     if: "${{ github.ref_type == 'tag' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) }}"
     runs-on: ubuntu-latest
+    outputs:
+      provenance-artifact-id: ${{ steps.upload-provenance.outputs.artifact-id }}
     needs:
       - build
     permissions:
@@ -59,19 +55,20 @@ jobs:
     steps:
       - name: Generate SLSA Provenance
         id: provenance
-        uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # ratchet:actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # ratchet:actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ needs.build.outputs.toolchain-artifact-name }}
-          subject-digest: ${{ format('sha256:{0}', needs.build.outputs.toolchain-checksum) }}
+          subject-name: ${{ needs.build.outputs.toolchain-filename }}
+          subject-digest: sha256:${{ needs.build.outputs.toolchain-checksum }}
 
       - name: Rename provenance file
-        run: mv ${{ steps.provenance.outputs.bundle-path }} ${{ needs.build.outputs.toolchain-artifact-provenance-name }}
+        run: mv ${{ steps.provenance.outputs.bundle-path }} ${{ needs.build.outputs.toolchain-filename }}.slsa.jsonl
 
       - name: Upload provenance bundle
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # ratchet:actions/upload-artifact@v4
+        id: upload-provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4
         with:
-          name: ${{ needs.build.outputs.toolchain-artifact-provenance-name }}
-          path: ${{ needs.build.outputs.toolchain-artifact-provenance-name }}
+          name: provenance
+          path: ${{ needs.build.outputs.toolchain-filename }}.slsa.jsonl
           if-no-files-found: error
 
   release:
@@ -85,15 +82,20 @@ jobs:
       contents: write
       id-token: none
     steps:
-      - name: Download Artifacts
-        id: toolchain
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # ratchet:actions/download-artifact@v4
+      - name: Download Toolchain artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # ratchet:actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true
+          artifact-ids: ${{ needs.build.outputs.toolchain-artifact-id }}
+
+      - name: Download Provenance artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # ratchet:actions/download-artifact@v4
+        with:
+          path: dist
+          artifact-ids: ${{ needs.provenance.outputs.provenance-artifact-id }}
 
       - name: List Artifacts
-        run: ls -Al dist
+        run: ls -ARl dist
 
       # Using gh (which is written in go) is okay here as it is executed after building the
       # go toolchain and signing SLSA provenance in previous jobs and has no access to OIDC
@@ -103,11 +105,12 @@ jobs:
         id: release
         run: >-
           gh release create
+          --verify-tag
           --repo ${{ github.repository }}
           --title "Go Bootstrap Toolchain ${{ needs.build.outputs.toolchain-version }}"
           ${{ github.ref_name }}
-          dist/${{ needs.build.outputs.toolchain-artifact-name }}
-          dist/${{ needs.build.outputs.toolchain-artifact-sha256-name }}
-          dist/${{ needs.build.outputs.toolchain-artifact-provenance-name }}
+          dist/toolchain/${{ needs.build.outputs.toolchain-filename }}
+          dist/toolchain/${{ needs.build.outputs.toolchain-filename }}.sha256
+          dist/provenance/${{ needs.build.outputs.toolchain-filename }}.slsa.jsonl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

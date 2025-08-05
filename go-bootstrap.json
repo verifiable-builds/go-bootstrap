@@ -1,0 +1,27 @@
+[
+  {
+    "name": "go1.4",
+    "commit": "ceb95ea6aef52c1fb472d3539c6ef68670778b5b",
+    "expect": null
+  },
+  {
+    "name": "go1.17",
+    "commit": "15da892a4950a4caac987ee72c632436329f62d5",
+    "expect": null
+  },
+  {
+    "name": "go1.20",
+    "commit": "90a870f1dc49bfcc6ffe95f80fbaf21875198e7a",
+    "expect": null
+  },
+  {
+    "name": "go1.22",
+    "commit": "5817e650946aaa0ac28956de96b3f9aa1de4b299",
+    "expect": "4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43"
+  },
+  {
+    "name": "go1.24",
+    "commit": "9d828e80fa1f3cc52de60428cae446b35b576de8",
+    "expect":"10ad9e86233e74c0f6590fe5426895de6bf388964210eac34a6d83f38918ecdc"
+  }
+]
