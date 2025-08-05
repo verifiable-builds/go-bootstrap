@@ -1,8 +1,6 @@
 {
   "git.ignoreLimitWarning": true,
-  // Disable automatic tasks detection.
   "task.allowAutomaticTasks": "off",
   "task.autoDetect": "off",
-  "go.tasks.provideDefault": false,
   "typescript.tsc.autoDetect": "off",
 }

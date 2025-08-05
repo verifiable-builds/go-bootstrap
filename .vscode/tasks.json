@@ -10,7 +10,7 @@
       "args": [
         "--apply-ignore",
         "--write",
-        "${workspaceFolder}/bootstrap.sh"
+        "${workspaceFolder}/go-bootstrap.sh"
       ],
       "group": {
         "kind": "build",
