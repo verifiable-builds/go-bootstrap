@@ -177,7 +177,8 @@ function __signal_handler_sigint() {
 # Fetches sources pointing at a specific commit.
 # This does not overwrite any dirs.
 function fetch_sources() {
-    local output_dir
+    local version
+    local name
     local commit
     local systemd_instance="user"
 
@@ -187,11 +188,15 @@ function fetch_sources() {
             shift
             commit="${1}"
             ;;
-        --output)
+        --name)
             shift
-            output_dir="${1}"
+            name="${1}"
             ;;
-        --systemd-instance)
+        --version)
+            shift
+            version="${1}"
+            ;;
+        --systemd)
             shift
             systemd_instance="${1}"
             ;;
@@ -202,18 +207,23 @@ function fetch_sources() {
         shift
     done
 
-    # Check if output directory is valid. Allows go1.x format only.
-    if [[ -z ${output_dir} ]]; then
-        log_abort "fetch_sources: --output cannot be empty"
+    if [[ -z ${name} || -z ${version} ]]; then
+        log_abort "fetch_sources: --name/--version cannot be empty"
     fi
 
-    if [[ ! ${output_dir} =~ ^go1.[0-9][0-9]?$ ]]; then
-        log_abort "fetch_sources: invalid output_dir: ${output_dir}"
+    # Check if name is valid. Allows go1.x format only.
+    if [[ ! ${name} =~ ^go1.[0-9][0-9]?$ ]]; then
+        log_abort "fetch_sources: invalid name: ${name}"
+    fi
+
+    # Check if version is valid.
+    if [[ ! ${version} =~ ^go1.((4-bootstrap-[0-9]+)|([0-9]+)(rc[0-9]|.[0-9]+))$ ]]; then
+        log_abort "fetch_sources: invalid version: ${version}"
     fi
 
     # Check if commit hash is valid. Lowercases only.
     if [[ -z ${commit} ]]; then
-        log_abort "fetch_sources: --commit cannot be empty"
+        log_abort "fetch_sources: commit cannot be empty"
     fi
 
     if [[ ! ${commit} =~ ^[0-9a-f]{5,40}$ ]]; then
@@ -225,33 +235,31 @@ function fetch_sources() {
         systemd_instance_flag="--system"
     fi
 
-    local src_display_name="${output_dir}"
-    log_notice "Fetch ${src_display_name}@${commit}"
+    log_notice "Fetch ${name}@${commit}"
     log_draw_line_notice
 
     # Check if directory already exists. If exits, commit hash is expected one.
-    local __output_dir="upstream/${output_dir}"
+    local __output_dir="upstream/${name}"
     if [[ -e ${__output_dir} ]]; then
         log_info "Directory already exists: ${__output_dir}"
         # Verify we already have the correct source.
         local existing_commit
         existing_commit="$(git -C "${__output_dir}" show --quiet --format=%H HEAD 2>/dev/null)"
         if [[ -z ${existing_commit} ]]; then
-            log_abort "Failed to get existing commit hash for ${src_display_name}"
+            log_abort "Failed to get existing commit hash for ${name}"
         fi
 
         if [[ ${existing_commit,,} == "${commit}" ]]; then
-            log_success "Sources for ${src_display_name} are already cloned"
+            log_success "Sources for ${version} are already cloned"
             log_success "Expected commit hash: ${commit}"
             log_success "Actual commit hash  : ${existing_commit}"
-            log_draw_line_success
         else
-            log_error "Commit hash mismatch for ${src_display_name}"
+            log_error "Commit hash mismatch for ${name}"
             log_error "Expected commit hash: ${commit}"
             log_abort "Actual commit hash  : ${existing_commit}"
         fi
     else
-        log_info "Downloading ${src_display_name} sources to ${__output_dir}"
+        log_info "Downloading ${name} sources to ${__output_dir}"
 
         # Cleanup any previous workers.
         declare -r builder_unit="go-bootstrap-task-runner.service"
@@ -284,12 +292,31 @@ function fetch_sources() {
             --depth=1 \
             --revision "${commit}" \
             https://go.googlesource.com/go \
-            "${__output_dir}" 2>&1 | log_tail "${output_dir}"; then
-            log_success "Successfully downloaded sources for ${src_display_name} to ${__output_dir}"
-            log_draw_line_success
+            "${__output_dir}" 2>&1 | log_tail "${name}"; then
+            log_success "Downloaded sources for ${name} to ${__output_dir}"
         else
-            log_abort "Failed to download sources for ${src_display_name} to ${__output_dir}"
+            log_abort "Failed to download sources for ${name} to ${__output_dir}"
         fi
+    fi
+
+    local go_version_line
+    local go_version_file="${__output_dir}/VERSION"
+    if [[ -f ${go_version_file} ]]; then
+        read -r go_version_line <"${go_version_file:-/dev/null}"
+        if [[ -z ${go_version_line} ]]; then
+            log_abort "Failed to read version file - ${go_version_file}"
+        fi
+    else
+        log_abort "${name} VERSION file ($go_version_file) not found"
+    fi
+
+    # Ensure that name matches the version.
+    if [[ ${go_version_line} != "${version}" ]]; then
+        log_error "Expected VERSION: ${version}"
+        log_abort "Actual   VERSION: ${go_version_line}"
+    else
+        log_debug "VERSION in ${go_version_file} matches ${version}"
+        log_draw_line_success
     fi
 }
 
@@ -297,24 +324,30 @@ function fetch_sources() {
 function build_stage() {
     local go_root
     local go_root_bootstrap
+    local version
+    local name
     local systemd_instance="user"
     local go_distpack_toolchain_sha256
 
     while [[ ${1} != "" ]]; do
         case ${1} in
-        --go-root)
+        --name)
             shift
-            go_root="${1}"
+            name="${1}"
             ;;
-        --go-root-bootstrap)
+        --version)
+            shift
+            version="${1}"
+            ;;
+        --bootstrap)
             shift
             go_root_bootstrap="${1}"
             ;;
-        --expect-toolchain-sha256)
+        --expect)
             shift
             go_distpack_toolchain_sha256="${1}"
             ;;
-        --systemd-instance)
+        --systemd)
             shift
             systemd_instance="${1}"
             ;;
@@ -347,7 +380,7 @@ function build_stage() {
         go_distpack_toolchain_sha256="none"
     fi
 
-    log_notice "Build ${go_root} using ${bootstrap_tool}"
+    log_notice "Build ${name} using ${bootstrap_tool}"
     log_draw_line_notice
 
     # systemd ephemeral unit which runs the the actual build task.
@@ -364,20 +397,19 @@ function build_stage() {
     fi
 
     local go_version_line
-    local go_version_file="upstream/${go_root}/VERSION"
+    local go_version_file="upstream/${name}/VERSION"
     if [[ -f ${go_version_file} ]]; then
         read -r go_version_line <"${go_version_file:-/dev/null}"
         if [[ -z ${go_version_line} ]]; then
             log_abort "Failed to read version file - ${go_version_file}"
         fi
     else
-        log_abort "${go_root} VERSION file ($go_version_file) not found"
+        log_abort "${name} VERSION file ($go_version_file) not found"
     fi
 
     # Ensure that name matches the version.
-    declare -r version_regex="^${go_root}"
-    if [[ ! ${go_version_line} =~ ^${go_root} ]]; then
-        log_abort "Go version in VERSION file(${go_version_line}) MUST match GOROOT ${go_root}"
+    if [[ ${go_version_line} != "${version}" ]]; then
+        log_abort "Go version in VERSION file(${go_version_line}) MUST match version(${version})"
     fi
 
     # Vast majority of the builds are done as normal user.
@@ -387,7 +419,7 @@ function build_stage() {
     fi
 
     local go_root_path
-    go_root_path="${PWD}/upstream/${go_root}"
+    go_root_path="${PWD}/upstream/${name}"
 
     log_info "VERSION          : ${go_version_line}"
     log_info "GOROOT           : ${go_root_path}"
@@ -406,6 +438,7 @@ function build_stage() {
     # in the toolchain and change the generated binaries.
     if systemd-run \
         --quiet \
+        --send-sighup \
         --no-ask-password \
         "${systemd_instance_flag}" \
         "${systemd_run_options[@]}" \
@@ -439,15 +472,15 @@ function build_stage() {
         -E GO_LDSO="" \
         -E PKG_CONFIG="" \
         --working-directory="${go_root_path}/src" \
-        bash make.bash 2>&1 | log_tail "${go_root}"; then
-        log_success "Successfully built ${go_root} toolchain"
+        bash make.bash 2>&1 | log_tail "${name}"; then
+        log_success "Successfully built ${name} toolchain"
         log_draw_line_success
     else
-        log_abort "Failed to build ${go_root} toolchain"
+        log_abort "Failed to build ${name} toolchain"
     fi
 
     if [[ ${go_distpack_toolchain_sha256} != "none" ]]; then
-        log_info "Verifying ${go_root} build is reproducible"
+        log_info "Verifying ${name} build is reproducible"
         log_draw_line_info
         if [[ ! -f "${go_root_path}/pkg/distpack/${go_version_line}.linux-amd64.tar.gz" ]]; then
             log_abort "Build script did not generate distpack archive"
@@ -455,7 +488,7 @@ function build_stage() {
 
         local go_distpack_toolchain_checksum
         local go_distpack_toolchain_name="${go_version_line}.linux-amd64.tar.gz"
-        local go_distpack_toolchain_path="upstream/${go_root}/pkg/distpack/${go_distpack_toolchain_name}"
+        local go_distpack_toolchain_path="upstream/${name}/pkg/distpack/${go_distpack_toolchain_name}"
         go_distpack_toolchain_checksum="$(sha256sum "$go_distpack_toolchain_path")"
 
         if [[ ${go_distpack_toolchain_sha256} == "${go_distpack_toolchain_checksum%% *}" ]]; then
@@ -466,15 +499,15 @@ function build_stage() {
 
             log_success "Expected checksum : ${go_distpack_toolchain_sha256}"
             log_success "Actual checksum   : ${go_distpack_toolchain_checksum%% *}"
-            log_success "${go_root} checksums match with official releases, build is reproducible"
+            log_success "${name} checksums match with official releases, build is reproducible"
             log_draw_line_success
         else
             log_error "Expected checksum : ${go_distpack_toolchain_sha256}"
             log_error "Actual checksum   : ${go_distpack_toolchain_checksum%% *}"
-            log_abort "${go_root} checksums DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
+            log_abort "${name} checksums DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
         fi
     else
-        log_warning "Skipped reproducibility checks for ${go_root}"
+        log_warning "Skipped reproducibility checks for ${name}"
         log_draw_line_warning
     fi
 }
@@ -512,6 +545,8 @@ function main() {
 
     local build="false"
     local clean="false"
+    local fetch="false"
+
     local go_stage_0="gcc"
     local build_from=""
 
@@ -519,13 +554,17 @@ function main() {
         case ${1} in
         -b | --build)
             build=true
+            fetch="true"
             ;;
         -c | --clean)
             clean=true
             ;;
-        --from)
+        --from-stage)
             shift
             build_from="${1}"
+            ;;
+        --fetch)
+            fetch="true"
             ;;
         --github-actions | --actions)
             GITHUB_ACTIONS="true"
@@ -544,8 +583,8 @@ function main() {
     done
 
     # Running the script without any flags does nothing, but print some help message.
-    if [[ $clean == "false" && $build == "false" ]]; then
-        log_abort "Invalid Flags: Please specify an action like --build/--clean"
+    if [[ $clean == "false" && $build == "false" && $fetch == "false" ]]; then
+        log_abort "Invalid Flags: Please specify an action like --build/--clean/--fetch"
     fi
 
     # Ensure that script is running from repository root as working directory.
@@ -568,7 +607,7 @@ function main() {
         fi
     fi
 
-    if [[ $build == "true" ]]; then
+    if [[ $build == "true" || $fetch == "true" ]]; then
         local go_arch go_os
         go_arch="$(uname -m)"
         go_os="$(uname -s)"
@@ -581,7 +620,6 @@ function main() {
         declare -a commands=(
             "systemd-run" # systemd
             "sha256sum"   # coreutils
-            "curl"        # curl
             "gcc"         # gcc
             "git"         # git
             "jq"          # jq
@@ -632,15 +670,16 @@ function main() {
         # Dump config file
         log_tail "config" <<<"${config_data}"
 
-        # Each element of the array MUST have name, commit, bootstrap and reproducible keys.
+        # Each element of the array MUST have name, commit, version and checksum keys.
         #
         # First redirect stderr to stdout — the pipe; then redirect stdout to /dev/null.
         # https://stackoverflow.com/questions/2342826/how-can-i-pipe-stderr-and-not-stdout.
-        if jq --exit-status 'map(
+        if jq --exit-status '.steps | map(
                 (has("name") and (.name | type == "string")) and
+                (has("version") and (.version | type == "string")) and
                 (has("commit") and (.commit | type == "string")) and
-                (has("expect") and (.expect | type == "string" or .expect == null))
-            ) | all' <<<"$config_data" 2>&1 >/dev/null | log_tail "validate"; then
+                (has("checksum") and (.checksum | type == "string" or .checksum == null))
+            ) | all' <<<"$config_data" 2>&1 | log_tail "validate"; then
             log_info "Config file is a valid JSON, with required fields"
         else
             log_error "Config file ${config_path} is invalid!"
@@ -651,30 +690,33 @@ function main() {
         # ensure that values are valid and acceptable.
         declare -a steps
         declare -A bootstrap_map
+        declare -A version_map
         declare -A commit_map
         declare -A repro_map
 
         # Read all the names in the steps. Oder of steps matters!!
-        readarray -t steps < <(jq -r '.[].name' <<<"${config_data}" 2>/dev/null)
+        readarray -t steps < <(jq -r '.steps[].name' <<<"${config_data}" 2>/dev/null)
         if [[ ${#steps[@]} -lt 4 ]]; then
             log_abort "Config defines only ${#steps[@]} steps, minimum 4 required"
         fi
 
         # Build config maps.
-        # Map name->bootstrap, name->commit, name->reproducible hash.
+        # name->version,
+        # name->bootstrap,
+        # name->commit,
+        # name->reproducible hash.
         declare -i config_errors=0
         log_draw_line_debug
         for index in "${!steps[@]}"; do
             local item="${steps[${index}]}"
 
             # Validate all the steps have a valid name.
-            # Name should correspond to go version.
-            if [[ ! ${item} =~ ^go1.[0-9][0-9]?$ ]]; then
+            if [[ ! ${item} =~ ^go1.[0-9] ]]; then
                 log_error "Name ${item} is not a valid go version."
                 ((++config_errors))
                 continue
             else
-                log_debug "Toolchain Version     : ${item}"
+                log_debug "Toolchain Name        : ${item}"
             fi
 
             # Build bootstrap map from names.
@@ -691,25 +733,41 @@ function main() {
             fi
             log_debug "Bootstrap Toolchain   : ${bootstrap_map["${item}"]}"
 
-            # Build commit map from names.
-            local __commit
-            __commit="$(jq -r --arg name "${item}" '.[] | select(.name==$name) | .commit' <<<"${config_data}" 2>/dev/null)"
-            if [[ ! ${__commit[0]} =~ ^[a-fA-F0-9]{40}$ ]]; then
-                log_error "Commit for building ${item}(${__commit[0]}) is not a valid SHA1 hash"
+            # Build version map from names.
+            local __version
+            __version="$(jq -r --arg name "${item}" '.steps[] | select(.name==$name) | .version' <<<"${config_data}" 2>/dev/null)"
+            if [[ ! ${__version} =~ ^go1.((4-bootstrap-[0-9]+)|([0-9]+)(rc[0-9]|.[0-9]+))$ ]]; then
+                log_error "Version for ${item} is not valid!"
                 ((++config_errors))
                 continue
             else
-                log_debug "Upstream Commit       : ${__commit[0]}"
+                log_debug "Release Version       : ${__version}"
+                version_map["${item}"]="${__version,,}"
+            fi
+            unset __version
+
+            # Build commit map from names.
+            local __commit
+            __commit="$(jq -r --arg name "${item}" '.steps[] | select(.name==$name) | .commit' <<<"${config_data}" 2>/dev/null)"
+            if [[ ! ${__commit} =~ ^[a-fA-F0-9]{40}$ ]]; then
+                log_error "Commit for building ${item}(${__commit}) is not a valid SHA1 hash"
+                ((++config_errors))
+                continue
+            else
+                log_debug "Upstream Commit       : ${__commit}"
                 commit_map["${item}"]="${__commit,,}"
             fi
             unset __commit
 
             # Build reproducible hash map from names.
             local __repro
-            __repro="$(jq -r --arg name "${item}" '.[] | select(.name==$name) | .expect' <<<"${config_data}" 2>/dev/null)"
+            __repro="$(jq -r --arg name "${item}" '.steps[] | select(.name==$name) | .checksum' <<<"${config_data}" 2>/dev/null)"
             if [[ -z ${__repro} || ${__repro} == "null" ]]; then
+                local __go_major_version="${item#go1.}"
+                __go_major_version="${__go_major_version%%.*}"
+                __go_major_version="${__go_major_version%%-*}"
                 # Ensure that go versions > go1.21 are always reproducible.
-                if [[ ${item#go1.} -gt 21 ]]; then
+                if [[ $__go_major_version  -gt 21 ]]; then
                     log_error "${item} is guaranteed to be reproducible, but SHA256 hashes are missing"
                     ((++config_errors))
                 else
@@ -751,17 +809,22 @@ function main() {
 
         # Indicate builders may have to be cleaned up.
         declare -g __GO_BOOTSTRAP_BUILDER_CLEANUP="true"
+    fi
 
-        # Fetch sources step by step. Abort if any stage errors.
+    # Fetch sources step by step. Abort if any stage errors.
+    if [[ $fetch == "true" ]]; then
         declare -i step_index=0
         for step in "${steps[@]}"; do
             fetch_sources \
-                --systemd-instance "${systemd_instance}" \
-                --commit "${commit_map["${step}"]}" \
-                --output "${step}"
+                --name "${step}" \
+                --systemd "${systemd_instance}" \
+                --version "${version_map["${step}"]}" \
+                --commit "${commit_map["${step}"]}"
         done
+    fi
 
-        # Build step by step. Abort if any stage errors.
+    # Build step by step. Abort if any stage errors.
+    if [[ $build == "true" ]]; then
         declare -i step_index=0
         for step in "${steps[@]}"; do
             if [[ ${step_index} -lt ${step_init_index} ]]; then
@@ -771,10 +834,11 @@ function main() {
                 continue
             fi
             build_stage \
-                --systemd-instance "${systemd_instance}" \
-                --go-root-bootstrap "${bootstrap_map["${step}"]}" \
-                --go-root "${step}" \
-                --expect-toolchain-sha256 "${repro_map["${step}"]}"
+                --name "${step}" \
+                --systemd "${systemd_instance}" \
+                --bootstrap "${bootstrap_map["${step}"]}" \
+                --version "${version_map["${step}"]}" \
+                --expect "${repro_map["${step}"]}"
             ((step_index++))
         done
 

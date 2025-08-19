@@ -1,6 +1,6 @@
 {
+  "task.autoDetect": "off",
   "git.ignoreLimitWarning": true,
   "task.allowAutomaticTasks": "off",
-  "task.autoDetect": "off",
   "typescript.tsc.autoDetect": "off",
 }
