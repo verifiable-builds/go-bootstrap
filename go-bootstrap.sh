@@ -70,7 +70,7 @@ function log_error() {
     local timestamp
     printf -v timestamp "%(%T)T" -1
     if __is_colorable; then
-        printf "\e[38;5;250m%s\e[0m\e[38;5;197m [•] %s\e[0m\n" "${timestamp}" "${1}"
+        printf "\e[38;5;250m%s\e[0m\e[38;5;196m [•] %s\e[0m\n" "${timestamp}" "${1}"
     else
         printf "%s [%-6s] %s\n" "${timestamp}" "ERROR" "${1}"
     fi
@@ -87,6 +87,23 @@ function log_tail() {
         printf -v timestamp "%(%T)T" -1
         if [[ $colorable == "true" ]]; then
             printf "\e[38;5;250m%s\e[0m\e[38;5;246m [•] (%s) %s\e[0m\n" "${timestamp}" "${1:-unknown}" "${line}"
+        else
+            printf "%s [%-6s] (%s) %s\n" "${timestamp}" "INFO" "${1:-unknown}" "${line}"
+        fi
+    done
+}
+
+function log_tail_error() {
+    local colorable="false"
+    if __is_colorable; then
+        colorable="true"
+    fi
+
+    local timestamp
+    while IFS= read -r line; do
+        printf -v timestamp "%(%T)T" -1
+        if [[ $colorable == "true" ]]; then
+            printf "\e[38;5;250m%s\e[0m\e[38;5;197m [•] (%s) %s\e[0m\n" "${timestamp}" "${1:-unknown}" "${line}"
         else
             printf "%s [%-6s] (%s) %s\n" "${timestamp}" "INFO" "${1:-unknown}" "${line}"
         fi
@@ -241,16 +258,15 @@ function fetch_sources() {
     # Check if directory already exists. If exits, commit hash is expected one.
     local __output_dir="upstream/${name}"
     if [[ -e ${__output_dir} ]]; then
-        log_info "Directory already exists: ${__output_dir}"
+        log_debug "Directory already exists: ${__output_dir}"
         # Verify we already have the correct source.
         local existing_commit
-        existing_commit="$(git -C "${__output_dir}" show --quiet --format=%H HEAD 2>/dev/null)"
+        existing_commit="$(git --no-pager --git-dir="${__output_dir}/.git" show --quiet --format=%H HEAD 2> >(log_tail_error "git" 1>&2))"
         if [[ -z ${existing_commit} ]]; then
             log_abort "Failed to get existing commit hash for ${name}"
         fi
 
         if [[ ${existing_commit,,} == "${commit}" ]]; then
-            log_success "Sources for ${version} are already cloned"
             log_success "Expected commit hash: ${commit}"
             log_success "Actual commit hash  : ${existing_commit}"
         else
@@ -312,10 +328,11 @@ function fetch_sources() {
 
     # Ensure that name matches the version.
     if [[ ${go_version_line} != "${version}" ]]; then
-        log_error "Expected VERSION: ${version}"
-        log_abort "Actual   VERSION: ${go_version_line}"
+        log_error "Expected VERSION    : ${version}"
+        log_abort "Actual VERSION      : ${go_version_line}"
     else
-        log_debug "VERSION in ${go_version_file} matches ${version}"
+        log_success "Expected VERSION    : ${version}"
+        log_success "Actual VERSION      : ${go_version_line}"
         log_draw_line_success
     fi
 }
@@ -328,6 +345,7 @@ function build_stage() {
     local name
     local systemd_instance="user"
     local go_distpack_toolchain_sha256
+    local dry_build
 
     while [[ ${1} != "" ]]; do
         case ${1} in
@@ -350,6 +368,10 @@ function build_stage() {
         --systemd)
             shift
             systemd_instance="${1}"
+            ;;
+        --dry-build)
+            shift
+            dry_build="${1}"
             ;;
         *)
             log_abort "build_stage: Invalid arguments - $*"
@@ -436,50 +458,54 @@ function build_stage() {
 
     # Clear various settings that would leak into defaults
     # in the toolchain and change the generated binaries.
-    if systemd-run \
-        --quiet \
-        --send-sighup \
-        --no-ask-password \
-        "${systemd_instance_flag}" \
-        "${systemd_run_options[@]}" \
-        --unit "${builder_unit}" \
-        -p RuntimeMaxSec=15m \
-        -E GOROOT="${go_root_path}" \
-        -E GOROOT_BOOTSTRAP="${go_root_bootstrap_path}" \
-        -E GO_DISTFLAGS="${go_dist_flags}" \
-        -E CGO_ENABLED="${cgo_enabled}" \
-        -E GO_LDFLAGS="${go_ld_flags}" \
-        -E GOTOOLCHAIN="local" \
-        -E GOPROXY="" \
-        -E GOVCS="" \
-        -E GOTOOLDIR="" \
-        -E GOTOOLDIR="" \
-        -E CC_FOR_TARGET="" \
-        -E CXX="" \
-        -E CXX_FOR_TARGET="" \
-        -E GO386="" \
-        -E GOAMD64="" \
-        -E GOARM="" \
-        -E GOBIN="" \
-        -E GOEXPERIMENT="" \
-        -E GOMIPS64="" \
-        -E GOMIPS="" \
-        -E GOPATH="" \
-        -E GOPPC64="" \
-        -E GOROOT_FINAL="" \
-        -E GO_EXTLINK_ENABLED="" \
-        -E GO_GCFLAGS="" \
-        -E GO_LDSO="" \
-        -E PKG_CONFIG="" \
-        --working-directory="${go_root_path}/src" \
-        bash make.bash 2>&1 | log_tail "${name}"; then
-        log_success "Successfully built ${name} toolchain"
-        log_draw_line_success
+    if [[ ${dry_build} == "false" ]]; then
+        if systemd-run \
+            --quiet \
+            --send-sighup \
+            --no-ask-password \
+            "${systemd_instance_flag}" \
+            "${systemd_run_options[@]}" \
+            --unit "${builder_unit}" \
+            -p RuntimeMaxSec=15m \
+            -E GOROOT="${go_root_path}" \
+            -E GOROOT_BOOTSTRAP="${go_root_bootstrap_path}" \
+            -E GO_DISTFLAGS="${go_dist_flags}" \
+            -E CGO_ENABLED="${cgo_enabled}" \
+            -E GO_LDFLAGS="${go_ld_flags}" \
+            -E GOTOOLCHAIN="local" \
+            -E GOPROXY="" \
+            -E GOVCS="" \
+            -E GOTOOLDIR="" \
+            -E GOTOOLDIR="" \
+            -E CC_FOR_TARGET="" \
+            -E CXX="" \
+            -E CXX_FOR_TARGET="" \
+            -E GO386="" \
+            -E GOAMD64="" \
+            -E GOARM="" \
+            -E GOBIN="" \
+            -E GOEXPERIMENT="" \
+            -E GOMIPS64="" \
+            -E GOMIPS="" \
+            -E GOPATH="" \
+            -E GOPPC64="" \
+            -E GOROOT_FINAL="" \
+            -E GO_EXTLINK_ENABLED="" \
+            -E GO_GCFLAGS="" \
+            -E GO_LDSO="" \
+            -E PKG_CONFIG="" \
+            --working-directory="${go_root_path}/src" \
+            bash make.bash 2>&1 | log_tail "${name}"; then
+            log_success "Successfully built ${name} toolchain"
+            log_draw_line_success
+        else
+            log_abort "Failed to build ${name} toolchain"
+        fi
     else
-        log_abort "Failed to build ${name} toolchain"
+        log_warning "Skipped building ${name}, as --dry-build is enabled"
     fi
 
-    if [[ ${go_distpack_toolchain_sha256} != "none" ]]; then
+    if [[ ${go_distpack_toolchain_sha256} != "none" && ${dry_build} != "true" ]]; then
         log_info "Verifying ${name} build is reproducible"
         log_draw_line_info
         if [[ ! -f "${go_root_path}/pkg/distpack/${go_version_line}.linux-amd64.tar.gz" ]]; then
@@ -546,6 +572,7 @@ function main() {
     local build="false"
     local clean="false"
     local fetch="false"
+    local dry_build="false"
 
     local go_stage_0="gcc"
     local build_from=""
@@ -568,6 +595,10 @@ function main() {
             ;;
         --github-actions | --actions)
             GITHUB_ACTIONS="true"
+            ;;
+        --dry-build)
+            dry_build="true"
+            build="true"
             ;;
         -h | --help)
             display_usage
@@ -671,16 +702,13 @@ function main() {
         log_tail "config" <<<"${config_data}"
 
         # Each element of the array MUST have name, commit, version and checksum keys.
-        #
-        # First redirect stderr to stdout — the pipe; then redirect stdout to /dev/null.
-        # https://stackoverflow.com/questions/2342826/how-can-i-pipe-stderr-and-not-stdout.
         if jq --exit-status '.steps | map(
                 (has("name") and (.name | type == "string")) and
                 (has("version") and (.version | type == "string")) and
                 (has("commit") and (.commit | type == "string")) and
                 (has("checksum") and (.checksum | type == "string" or .checksum == null))
-            ) | all' <<<"$config_data" 2>&1 | log_tail "validate"; then
-            log_info "Config file is a valid JSON, with required fields"
+            ) | all' <<<"$config_data" 2>&1 >/dev/null | log_tail_error "validate"; then
+            log_success "Config file is a valid JSON, with required fields"
         else
             log_error "Config file ${config_path} is invalid!"
             log_abort "Please ensure that config file is a valid JSON, with required fields"
@@ -688,6 +716,7 @@ function main() {
 
         # Now that config is a valid JSON with required fields,
         # ensure that values are valid and acceptable.
+        log_notice "Validating config data from JSON"
         declare -a steps
         declare -A bootstrap_map
         declare -A version_map
@@ -838,7 +867,8 @@ function main() {
                 --systemd "${systemd_instance}" \
                 --bootstrap "${bootstrap_map["${step}"]}" \
                 --version "${version_map["${step}"]}" \
-                --expect "${repro_map["${step}"]}"
+                --expect "${repro_map["${step}"]}" \
+                --dry-build "${dry_build}"
             ((step_index++))
         done
 
