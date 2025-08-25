@@ -553,10 +553,9 @@ Script to bootstrap go toolchain from go1.4 sources.
 Usage: ${script} [OPTIONS]...
 
 Options:
-  --build             Bootstrap the go toolchain
-  --clean             Clean build artifacts
-  --clean-all         Clean sources and build artifacts
-  -h, --help          Display this help message
+  --build             Bootstrap the go toolchain.
+  --clean             Clean build artifacts and sources.
+  -h, --help          Display this help message.
 
 Environment:
   CLICOLOR_FORCE      Set this to NON-ZERO to force colored output.
