@@ -23,7 +23,7 @@ jobs:
       toolchain-artifact-id: ${{ steps.upload-toolchain.outputs.artifact-id }}
     steps:
       - name: Checkout
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # ratchet:actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # ratchet:actions/checkout@v5
         with:
           submodules: false
           persist-credentials: false
@@ -32,7 +32,7 @@ jobs:
         id: bootstrap
         run: ./go-bootstrap.sh --clean --build --github-actions
 
-      - name: Upload Toolchain & Checksum file
+      - name: Upload Toolchain
         id: upload-toolchain
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4
         with:
@@ -49,7 +49,6 @@ jobs:
     needs:
       - build
     permissions:
-      contents: read
       id-token: write
       attestations: write
     steps:
@@ -78,17 +77,16 @@ jobs:
       - build
       - provenance
     permissions:
-      attestations: read
       contents: write
-      id-token: none
+      attestations: read
     steps:
-      - name: Download Toolchain artifact
+      - name: Download Toolchain
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5
         with:
           path: dist
           artifact-ids: ${{ needs.build.outputs.toolchain-artifact-id }}
 
-      - name: Download Provenance artifact
+      - name: Download Provenance
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # ratchet:actions/download-artifact@v5
         with:
           path: dist
