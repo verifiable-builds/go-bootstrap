@@ -8,7 +8,8 @@
 This repository is used for building go bootstrap toolchain with SLSA provenance.
 
 - Bootstrap toolchain is **only built for linux/amd64**.
-- This project and its release assets/artifacts **MUST NOT BE USED for bootstrapping the go toolchain**.
+- This project and its release assets/artifacts
+**MUST ONLY BE USED for bootstrapping the go toolchain**.
 
 For LICENSE details of Go toolchain please consult the LICENSE file(s)
 inside the bootstrap archive. LICENSE file within this repository only
