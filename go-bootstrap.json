@@ -26,9 +26,9 @@
     },
     {
       "name": "go1.24",
-      "version": "go1.24.6",
-      "commit": "7f36edc26d4e3becb6d9c9008ff00f260bb19055",
-      "checksum": "bbca37cc395c974ffa4893ee35819ad23ebb27426df87af92e93a9ec66ef8712"
+      "version": "go1.24.7",
+      "commit": "d41a8222133aabaf5527eab64586050a0fbb773b",
+      "checksum": "da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f"
     }
   ]
 }
