@@ -455,6 +455,17 @@ function build_stage() {
         systemd_run_options+=("--slice-inherit")
     fi
 
+    if [[ ${__GO_BOOTSTRAP_BUILDER_USERNS} == "true" ]]; then
+        log_debug "Enabling isolation options using userns"
+        systemd_run_options+=(
+            "--property=PrivateUsers=yes"
+            "--property=PrivateNetwork=yes"
+            "--property=PrivateTmp=yes"
+            "--property=PrivateDevices=yes"
+            "--property=PrivateIPC=yes"
+        )
+    fi
+
     # Check if existing output matches the checksum (if defined).
     local go_build_skip="false"
     local go_distpack_toolchain_name="${go_version_line}.linux-amd64.tar.gz"
@@ -656,6 +667,15 @@ function main() {
         log_abort "This script MUST be executed from repository root!"
     fi
 
+    # Cleanup env variables if any.
+    unset __GO_BOOTSTRAP_BUILDER_CLEANUP
+    unset __GO_BOOTSTRAP_BUILDER_USERNS
+    unset __GO_BUILD_VERSION
+    unset __GO_DISTPACK_TOOLCHAIN_SHA256
+    unset __GO_DISTPACK_TOOLCHAIN_NAME
+    unset __GO_DISTPACK_TOOLCHAIN_PATH
+
+
     if [[ $clean == "true" ]]; then
         log_draw_line_notice
         log_notice "Cleaning sources and build artifacts"
@@ -790,7 +810,7 @@ function main() {
                 ((++config_errors))
                 continue
             else
-                log_debug "Release Version       : ${__version}"
+                log_debug "Toolchain Version     : ${__version}"
                 version_map["${item}"]="${__version,,}"
             fi
             unset __version
@@ -872,6 +892,34 @@ function main() {
 
         # Indicate builders may have to be cleaned up.
         declare -g __GO_BOOTSTRAP_BUILDER_CLEANUP="true"
+
+        # Check if unprivileged userns is available
+        declare -g __GO_BOOTSTRAP_BUILDER_USERNS="false"
+        if [[ -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
+            local unprivileged_userns_clone="$(</proc/sys/kernel/unprivileged_userns_clone)"
+            if [[ ${unprivileged_userns_clone} != "1" ]]; then
+                log_warning "Kernel does not support unprivileged userns"
+            else
+                log_success "Kernel supports unprivileged userns"
+                # Check for unprivileged when using apparmor restrictions.
+                if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns  ]]; then
+                    local apparmor_restrict_unprivileged_userns="$(</proc/sys/kernel/apparmor_restrict_unprivileged_userns )"
+                    if [[ ${apparmor_restrict_unprivileged_userns} == "1" ]]; then
+                        log_warning "AppArmor may restrict use of userns by unprivileged users."
+                        log_warning "Build network isolation cannot be guaranteed, and build may encounter errors."
+                    else
+                        __GO_BOOTSTRAP_BUILDER_USERNS="true"
+                        log_debug "AppArmor policy will not restrict use of userns"
+                    fi
+                else
+                    __GO_BOOTSTRAP_BUILDER_USERNS="true"
+                    log_debug "There does not appear to be apparmor restrictions on userns"
+                fi
+            fi
+        else
+            log_error "Failed to detect whether system supports unprivileged userns"
+        fi
+        log_draw_line_debug
     fi
 
     # Fetch sources step by step. Abort if any stage errors.
@@ -924,7 +972,7 @@ function main() {
         fi
 
         # Generate Toolchain checksum, This is here to keep it compatible with go.dev/dl.
-        log_info "Toolchain checksum is saved to dist/${__GO_DISTPACK_TOOLCHAIN_NAME}.sha256"
+        log_info "Saving toolchain checksum to dist/${__GO_DISTPACK_TOOLCHAIN_NAME}.sha256"
         if ! printf "%s" "${__GO_DISTPACK_TOOLCHAIN_SHA256}" \
             >"dist/${__GO_DISTPACK_TOOLCHAIN_NAME}.sha256"; then
             log_abort "Failed to generate SHA256 checksum file"

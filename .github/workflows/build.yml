@@ -27,6 +27,9 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - name: Allow User Namespaces
+        run: sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Bootstrap
         id: bootstrap
         run: ./go-bootstrap.sh --clean --build --github-actions
@@ -104,6 +107,7 @@ jobs:
         id: verify
         run: >-
           gh attestation verify
+          --format=json
           --deny-self-hosted-runners
           --repo ${{ github.repository }}
           --source-digest ${{ github.sha }}
@@ -112,6 +116,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # A custom app is used here instead of default github-actions app, as github-actions
+      # app cannot be added to repository rules bypass list.
       - name: Create Release Token
         uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # ratchet:actions/create-github-app-token@v2
         id: app-token
