@@ -166,17 +166,19 @@ function log_abort() {
 }
 
 function __exit_handler() {
-    if [[ ${__GO_BOOTSTRAP_BUILDER_CLEANUP:-false} != "false" ]]; then
+    if [[ ${__GO_BOOTSTRAP_BUILDER_CLEANUP:-false} == "true" ]]; then
+        local systemd_instance_flag="--user"
+        if [[ $(id -u) == "0" ]]; then
+            systemd_instance_flag="--system"
+        fi
         declare -r builder_unit="go-bootstrap-task-runner.service"
-        if systemctl --user --quiet is-active "${builder_unit}"; then
+        if systemctl "${systemd_instance_flag}" --quiet is-active "${builder_unit}"; then
             log_warning "Stopping existing builder (${builder_unit})"
-            if systemctl --user stop "${builder_unit}" 2>&1 | log_tail "clean"; then
+            if systemctl "${systemd_instance_flag}" stop "${builder_unit}" 2>&1 | log_tail "clean"; then
                 log_info "Successfully stopped existing builder - ${builder_unit}"
             else
                 log_error "Failed to stop existing builder - ${builder_unit}"
             fi
-        else
-            log_debug "Builder is not running - ${builder_unit}"
         fi
     fi
 }
@@ -279,9 +281,9 @@ function fetch_sources() {
 
         # Cleanup any previous workers.
         declare -r builder_unit="go-bootstrap-task-runner.service"
-        if systemctl --user --quiet is-active "${builder_unit}"; then
+        if systemctl "${systemd_instance_flag}" --quiet is-active "${builder_unit}"; then
             log_warning "Stopping existing worker - ${builder_unit}"
-            if systemctl --user stop "${builder_unit}" 2>&1 | log_tail "clean"; then
+            if systemctl "${systemd_instance_flag}" stop "${builder_unit}" 2>&1 | log_tail "clean"; then
                 log_info "Successfully killed existing worker - ${builder_unit}"
             else
                 log_abort "Failed to stop existing worker - ${builder_unit}"
@@ -297,10 +299,12 @@ function fetch_sources() {
         if systemd-run \
             --quiet \
             --no-ask-password \
+            --description="Git Fetch ${name}@${commit}" \
             "${systemd_instance_flag}" \
             "${systemd_run_options[@]}" \
             --unit "${builder_unit}" \
             -p RuntimeMaxSec=15m \
+            -p TimeoutStopSec=5s \
             -E TERM=dumb \
             git clone \
             --quiet \
@@ -345,7 +349,6 @@ function build_stage() {
     local name
     local systemd_instance="user"
     local go_distpack_toolchain_sha256
-    local dry_build
 
     while [[ ${1} != "" ]]; do
         case ${1} in
@@ -368,10 +371,6 @@ function build_stage() {
         --systemd)
             shift
             systemd_instance="${1}"
-            ;;
-        --dry-build)
-            shift
-            dry_build="${1}"
             ;;
         *)
             log_abort "build_stage: Invalid arguments - $*"
@@ -405,13 +404,19 @@ function build_stage() {
     log_notice "Build ${name} using ${bootstrap_tool}"
     log_draw_line_notice
 
+    # Vast majority of the builds are done as normal user.
+    local systemd_instance_flag="--user"
+    if [[ ${systemd_instance} == "system" ]]; then
+        systemd_instance_flag="--system"
+    fi
+
     # systemd ephemeral unit which runs the the actual build task.
     declare -r builder_unit="go-bootstrap-task-runner.service"
 
     # Cleanup any previous builders.
-    if systemctl --user --quiet is-active "${builder_unit}"; then
+    if systemctl "${systemd_instance_flag}" --quiet is-active "${builder_unit}"; then
         log_warning "Stopping existing builder - ${builder_unit}"
-        if systemctl --user stop "${builder_unit}" 2>&1 | log_tail "clean"; then
+        if systemctl "${systemd_instance_flag}" stop "${builder_unit}" 2>&1 | log_tail "clean"; then
             log_info "Successfully killed existing builder - ${builder_unit}"
         else
             log_abort "Failed to stop existing builder - ${builder_unit}"
@@ -434,21 +439,15 @@ function build_stage() {
         log_abort "Go version in VERSION file(${go_version_line}) MUST match version(${version})"
     fi
 
-    # Vast majority of the builds are done as normal user.
-    local systemd_instance_flag="--user"
-    if [[ ${systemd_instance} == "system" ]]; then
-        systemd_instance_flag="--system"
-    fi
-
     local go_root_path
     go_root_path="${PWD}/upstream/${name}"
 
-    log_info "VERSION          : ${go_version_line}"
-    log_info "GOROOT           : ${go_root_path}"
-    log_info "GOROOT_BOOTSTRAP : ${go_root_bootstrap_path}"
-    log_info "CGO_ENABLED      : ${cgo_enabled}"
-    log_info "GO_DISTFLAGS     : ${go_dist_flags}"
-    log_info "GO_LDFLAGS       : ${go_ld_flags}"
+    log_info "VERSION           : ${go_version_line}"
+    log_info "GOROOT            : ${go_root_path}"
+    log_info "GOROOT_BOOTSTRAP  : ${go_root_bootstrap_path}"
+    log_info "CGO_ENABLED       : ${cgo_enabled}"
+    log_info "GO_DISTFLAGS      : ${go_dist_flags}"
+    log_info "GO_LDFLAGS        : ${go_ld_flags}"
 
     # Inherit the slice when not running in CI.
     declare -a systemd_run_options=("--collect" "--wait" "--pipe" "--same-dir")
@@ -456,17 +455,69 @@ function build_stage() {
         systemd_run_options+=("--slice-inherit")
     fi
 
+    if [[ ${__GO_BOOTSTRAP_BUILDER_USERNS} == "true" ]]; then
+        log_debug "Enabling isolation options using userns"
+        systemd_run_options+=(
+            "--property=PrivateUsers=yes"
+            "--property=PrivateNetwork=yes"
+            "--property=PrivateTmp=yes"
+            "--property=PrivateDevices=yes"
+            "--property=PrivateIPC=yes"
+        )
+    fi
+
+    # Check if existing output matches the checksum (if defined).
+    local go_build_skip="false"
+    local go_distpack_toolchain_name="${go_version_line}.linux-amd64.tar.gz"
+    local go_distpack_toolchain_path="upstream/${name}/pkg/distpack/${go_distpack_toolchain_name}"
+    if [[ ${go_distpack_toolchain_sha256} != "none" ]]; then
+        if [[ -f ${go_distpack_toolchain_path} ]]; then
+            log_info "Checking SHA256 hashes of already built toolchain"
+            local go_distpack_existing_toolchain_checksum
+            go_distpack_existing_toolchain_checksum="$(sha256sum "$go_distpack_toolchain_path")"
+
+            if [[ ${go_distpack_toolchain_sha256} == "${go_distpack_existing_toolchain_checksum%% *}" ]]; then
+                declare -g __GO_BUILD_VERSION="${go_version_line}"
+                declare -g __GO_DISTPACK_TOOLCHAIN_SHA256="${go_distpack_toolchain_sha256}"
+                declare -g __GO_DISTPACK_TOOLCHAIN_NAME="${go_distpack_toolchain_name}"
+                declare -g __GO_DISTPACK_TOOLCHAIN_PATH="${go_distpack_toolchain_path}"
+
+                log_success "Expected checksum : ${go_distpack_toolchain_sha256}"
+                log_success "Actual checksum   : ${go_distpack_existing_toolchain_checksum%% *}"
+                log_success "Checksums for existing ${name} build match with official releases, build is reproducible, and skipped"
+                go_build_skip="true"
+                log_draw_line_success
+            else
+                log_warning "Expected checksum : ${go_distpack_toolchain_sha256}"
+                log_warning "Actual checksum   : ${go_distpack_existing_toolchain_checksum%% *}"
+                log_warning "Checksums for existing ${name} build DO NOT MATCH with official releases, REBUILDING the Toolchain"
+            fi
+        fi
+    else
+        # Its okay to skip the build as we don't care about non-reproducible
+        # builds as long as they lead to reproducible builds.
+        local go_root_bin_path="${go_root_path}/bin/go"
+        if [[ -f ${go_root_bin_path} ]]; then
+            go_build_skip="true"
+            log_warning "Skipped building ${name} as go binary already exists (build is not reproducible)"
+            log_draw_line_warning
+        fi
+    fi
+
     # Clear various settings that would leak into defaults
     # in the toolchain and change the generated binaries.
-    if [[ ${dry_build} == "false" ]]; then
+    if [[ ${go_build_skip} != "true" ]]; then
         if systemd-run \
             --quiet \
             --send-sighup \
             --no-ask-password \
+            --description="Build ${name} using ${go_root_bootstrap}" \
             "${systemd_instance_flag}" \
             "${systemd_run_options[@]}" \
             --unit "${builder_unit}" \
             -p RuntimeMaxSec=15m \
+            -p TimeoutStopSec=5s \
+            -p KillMode=control-group \
             -E GOROOT="${go_root_path}" \
             -E GOROOT_BOOTSTRAP="${go_root_bootstrap_path}" \
             -E GO_DISTFLAGS="${go_dist_flags}" \
@@ -501,11 +552,9 @@ function build_stage() {
         else
             log_abort "Failed to build ${name} toolchain"
         fi
-    else
-        log_warning "Skipped building ${name}, as --dry-build is enabled"
     fi
 
-    if [[ ${go_distpack_toolchain_sha256} != "none" && ${dry_build} != "true" ]]; then
+    if [[ ${go_distpack_toolchain_sha256} != "none" && ${go_build_skip} != "true" ]]; then
         log_info "Verifying ${name} build is reproducible"
         log_draw_line_info
         if [[ ! -f "${go_root_path}/pkg/distpack/${go_version_line}.linux-amd64.tar.gz" ]]; then
@@ -513,8 +562,6 @@ function build_stage() {
         fi
 
         local go_distpack_toolchain_checksum
-        local go_distpack_toolchain_name="${go_version_line}.linux-amd64.tar.gz"
-        local go_distpack_toolchain_path="upstream/${name}/pkg/distpack/${go_distpack_toolchain_name}"
         go_distpack_toolchain_checksum="$(sha256sum "$go_distpack_toolchain_path")"
 
         if [[ ${go_distpack_toolchain_sha256} == "${go_distpack_toolchain_checksum%% *}" ]]; then
@@ -533,8 +580,10 @@ function build_stage() {
             log_abort "${name} checksums DO NOT MATCH with official releases, build is NOT REPRODUCIBLE"
         fi
     else
-        log_warning "Skipped reproducibility checks for ${name}"
-        log_draw_line_warning
+        if [[ ${go_build_skip} != "true" ]]; then
+            log_warning "Skipped reproducibility checks for ${name}"
+            log_draw_line_warning
+        fi
     fi
 }
 
@@ -571,10 +620,10 @@ function main() {
     local build="false"
     local clean="false"
     local fetch="false"
-    local dry_build="false"
 
     local go_stage_0="gcc"
     local build_from=""
+    local sandbox_repo="false"
 
     while [[ ${1} != "" ]]; do
         case ${1} in
@@ -594,10 +643,6 @@ function main() {
             ;;
         --github-actions | --actions)
             GITHUB_ACTIONS="true"
-            ;;
-        --dry-build)
-            dry_build="true"
-            build="true"
             ;;
         -h | --help)
             display_usage
@@ -621,6 +666,15 @@ function main() {
     if [[ ! -s go-bootstrap.sh ]] || [[ ! -s go-bootstrap.json ]]; then
         log_abort "This script MUST be executed from repository root!"
     fi
+
+    # Cleanup env variables if any.
+    unset __GO_BOOTSTRAP_BUILDER_CLEANUP
+    unset __GO_BOOTSTRAP_BUILDER_USERNS
+    unset __GO_BUILD_VERSION
+    unset __GO_DISTPACK_TOOLCHAIN_SHA256
+    unset __GO_DISTPACK_TOOLCHAIN_NAME
+    unset __GO_DISTPACK_TOOLCHAIN_PATH
+
 
     if [[ $clean == "true" ]]; then
         log_draw_line_notice
@@ -653,6 +707,7 @@ function main() {
             "gcc"         # gcc
             "git"         # git
             "jq"          # jq
+            "curl"        # curl
         )
 
         declare -a missing_commands
@@ -747,6 +802,19 @@ function main() {
                 log_debug "Toolchain Name        : ${item}"
             fi
 
+            # Build version map from names.
+            local __version
+            __version="$(jq -r --arg name "${item}" '.steps[] | select(.name==$name) | .version' <<<"${config_data}" 2>/dev/null)"
+            if [[ ! ${__version} =~ ^go1.((4-bootstrap-[0-9]+)|([0-9]+)(rc[0-9]|.[0-9]+))$ ]]; then
+                log_error "Version for ${item} is not valid!"
+                ((++config_errors))
+                continue
+            else
+                log_debug "Toolchain Version     : ${__version}"
+                version_map["${item}"]="${__version,,}"
+            fi
+            unset __version
+
             # Build bootstrap map from names.
             # Bootstrap must start from go1.4 (which uses gcc/clang).
             if [[ ${index} -eq 0 ]]; then
@@ -760,19 +828,6 @@ function main() {
                 bootstrap_map["${item}"]="${steps[${index} - 1]}"
             fi
             log_debug "Bootstrap Toolchain   : ${bootstrap_map["${item}"]}"
-
-            # Build version map from names.
-            local __version
-            __version="$(jq -r --arg name "${item}" '.steps[] | select(.name==$name) | .version' <<<"${config_data}" 2>/dev/null)"
-            if [[ ! ${__version} =~ ^go1.((4-bootstrap-[0-9]+)|([0-9]+)(rc[0-9]|.[0-9]+))$ ]]; then
-                log_error "Version for ${item} is not valid!"
-                ((++config_errors))
-                continue
-            else
-                log_debug "Release Version       : ${__version}"
-                version_map["${item}"]="${__version,,}"
-            fi
-            unset __version
 
             # Build commit map from names.
             local __commit
@@ -795,7 +850,7 @@ function main() {
                 __go_major_version="${__go_major_version%%.*}"
                 __go_major_version="${__go_major_version%%-*}"
                 # Ensure that go versions > go1.21 are always reproducible.
-                if [[ $__go_major_version  -gt 21 ]]; then
+                if [[ $__go_major_version -gt 21 ]]; then
                     log_error "${item} is guaranteed to be reproducible, but SHA256 hashes are missing"
                     ((++config_errors))
                 else
@@ -819,7 +874,7 @@ function main() {
             log_abort "Bootstrap configuration has ${config_errors} error(s), please fix them to continue"
         fi
 
-        # Check if from is valid go version already specified.
+        # Check if build-from is valid go version which is already specified.
         declare -u step_init_index=0
         if [[ -n ${build_from} ]]; then
             if [[ ! " ${steps[*]} " =~ [[:space:]]${build_from}[[:space:]] ]]; then
@@ -837,6 +892,34 @@ function main() {
 
         # Indicate builders may have to be cleaned up.
         declare -g __GO_BOOTSTRAP_BUILDER_CLEANUP="true"
+
+        # Check if unprivileged userns is available
+        declare -g __GO_BOOTSTRAP_BUILDER_USERNS="false"
+        if [[ -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
+            local unprivileged_userns_clone="$(</proc/sys/kernel/unprivileged_userns_clone)"
+            if [[ ${unprivileged_userns_clone} != "1" ]]; then
+                log_warning "Kernel does not support unprivileged userns"
+            else
+                log_success "Kernel supports unprivileged userns"
+                # Check for unprivileged when using apparmor restrictions.
+                if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns  ]]; then
+                    local apparmor_restrict_unprivileged_userns="$(</proc/sys/kernel/apparmor_restrict_unprivileged_userns )"
+                    if [[ ${apparmor_restrict_unprivileged_userns} == "1" ]]; then
+                        log_warning "AppArmor may restrict use of userns by unprivileged users."
+                        log_warning "Build network isolation cannot be guaranteed, and build may encounter errors."
+                    else
+                        __GO_BOOTSTRAP_BUILDER_USERNS="true"
+                        log_debug "AppArmor policy will not restrict use of userns"
+                    fi
+                else
+                    __GO_BOOTSTRAP_BUILDER_USERNS="true"
+                    log_debug "There does not appear to be apparmor restrictions on userns"
+                fi
+            fi
+        else
+            log_error "Failed to detect whether system supports unprivileged userns"
+        fi
+        log_draw_line_debug
     fi
 
     # Fetch sources step by step. Abort if any stage errors.
@@ -866,8 +949,7 @@ function main() {
                 --systemd "${systemd_instance}" \
                 --bootstrap "${bootstrap_map["${step}"]}" \
                 --version "${version_map["${step}"]}" \
-                --expect "${repro_map["${step}"]}" \
-                --dry-build "${dry_build}"
+                --expect "${repro_map["${step}"]}"
             ((step_index++))
         done
 
@@ -875,7 +957,7 @@ function main() {
             log_abort "Build did not set required __GO_BUILD_* global variables"
         fi
 
-        # Copy distpack to /dist.
+        # create dist if it does not exit.
         if [[ ! -e dist ]]; then
             if ! mkdir -p dist 2>&1 | log_tail "mkdir-dist"; then
                 log_abort "Failed to create dist directory"
@@ -889,23 +971,97 @@ function main() {
             log_abort "Failed to copy distpack sdk to dist/${__GO_DISTPACK_TOOLCHAIN_NAME}"
         fi
 
-        # Generate Toolchain checksum, This is here to keep it compatibile with go.dev/dl.
-        log_info "Toolchain checksum is saved to dist/${__GO_DISTPACK_TOOLCHAIN_NAME}.sha256"
+        # Generate Toolchain checksum, This is here to keep it compatible with go.dev/dl.
+        log_info "Saving toolchain checksum to dist/${__GO_DISTPACK_TOOLCHAIN_NAME}.sha256"
         if ! printf "%s" "${__GO_DISTPACK_TOOLCHAIN_SHA256}" \
             >"dist/${__GO_DISTPACK_TOOLCHAIN_NAME}.sha256"; then
             log_abort "Failed to generate SHA256 checksum file"
         fi
+        log_draw_line_info
 
-        # Github Actions.
+        # Github Actions specific tasks.
         if [[ ${GITHUB_ACTIONS} == "true" ]]; then
+            local current_latest
+            log_notice "Checking latest release on GitHub"
+            curl_opts=(
+                "--silent"
+                "--show-error"
+                "--location"
+                "--connect-timeout" "5"
+                "--write-out" '%{http_code}'
+                "--header" "Accept: application/vnd.github+json"
+                "--header" "X-GitHub-Api-Version: 2022-11-28"
+                "--output" "dist/github-latest.json"
+            )
+
+            # If GITHUB_TOKEN is provided, use it.
+            if [[ -n ${GITHUB_TOKEN} ]]; then
+                log_notice "Using GITHUB_TOKEN for authenticating with GitHub API"
+                curl_opts+=("--header" "Authorization: Bearer ${GITHUB_TOKEN}")
+            else
+                log_warning "GITHUB_TOKEN is not defined, API requests may be rate limited"
+            fi
+
+            local latest_response
+            local latest_status_code
+            local latest_url="https://api.github.com/repos/verifiable-builds/go-bootstrap/releases/latest"
+            latest_status_code="$(curl "${curl_opts[@]}" "${latest_url}" 2> >(log_tail_error "curl" 1>&2))"
+            if [[ -z ${latest_status_code} ]]; then
+                log_error "Failed to fetch latest release data from github"
+                log_abort "See logs for more info. Might need to provide GITHUB_TOKEN to prevent rate limits"
+            fi
+
+            if [[ ${latest_status_code} != "200" ]] && [[ ${latest_status_code} != "404" ]]; then
+                log_error "GitHub API returned an error code ${latest_status_code}"
+                log_abort "See logs for more info. Might need to provide GITHUB_TOKEN to prevent rate limits"
+            else
+                log_debug "GitHub API returned status code: ${latest_status_code}"
+            fi
+
+            latest_response="$(<dist/github-latest.json)"
+            log_tail "api" <<<"${latest_response}"
+            if [[ -z ${latest_response} ]]; then
+                log_abort "GitHub API returned no data/status while checking for latest releases"
+            fi
+
+            # Try to parse JSON only if response is 200.
+            # Otherwise release does not exist which will trigger a new release.
+            local __GO_RELEASE_GATEKEEPER="false"
+            if [[ ${latest_status_code} == "404" ]]; then
+                log_warning "There are no releases published on GitHub"
+                log_warning "Publishing will be ENABLED to push new release to github if running on actions"
+                __GO_RELEASE_GATEKEEPER="true"
+            else
+                # Get latest tag name.
+                current_latest="$(jq -r '.tag_name' 2> >(log_tail "jq" 1>&2) <<<"${latest_response}")"
+                if [[ -z ${current_latest} ]]; then
+                    log_abort "Failed to parse JSON/Get release tag name API response"
+                fi
+
+                if [[ ${current_latest} == "${__GO_BUILD_VERSION}" ]]; then
+                    log_notice "Current local version(${__GO_BUILD_VERSION}) matches the one published at GitHub"
+                    log_notice "Publishing will be DISABLED to avoid triggering repository rules"
+                else
+                    __GO_RELEASE_GATEKEEPER="true"
+                    log_notice "Current local version(${__GO_BUILD_VERSION}) does not match the one published (${current_latest})"
+                    log_notice "Publishing will be ENABLED to push new release to github if running on actions"
+                fi
+            fi
+
+            log_draw_line_info
+            log_info "Github Action outputs are shown below"
+            log_draw_line_info
             log_info "toolchain-version=${__GO_BUILD_VERSION}"
             log_info "toolchain-checksum=${__GO_DISTPACK_TOOLCHAIN_SHA256}"
             log_info "toolchain-filename=${__GO_DISTPACK_TOOLCHAIN_NAME}"
+            log_info "toolchain-publish-release=${__GO_RELEASE_GATEKEEPER}"
+            log_draw_line_info
             if [[ -n ${GITHUB_OUTPUT} ]]; then
                 {
                     echo "toolchain-version=${__GO_BUILD_VERSION}"
                     echo "toolchain-checksum=${__GO_DISTPACK_TOOLCHAIN_SHA256}"
                     echo "toolchain-filename=${__GO_DISTPACK_TOOLCHAIN_NAME}"
+                    echo "toolchain-publish-release=${__GO_RELEASE_GATEKEEPER}"
 
                 } >>"${GITHUB_OUTPUT}"
             fi
