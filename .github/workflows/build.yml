@@ -46,7 +46,7 @@ jobs:
           compression-level: 0
 
   provenance:
-    if: "${{ needs.build.outputs.toolchain-publish-release == 'true' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}"
+    if: ${{ needs.build.outputs.toolchain-publish-release == 'true' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     outputs:
       provenance-artifact-id: ${{ steps.upload-provenance.outputs.artifact-id }}
@@ -75,7 +75,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: "${{ needs.build.outputs.toolchain-publish-release == 'true' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}"
+    if: ${{ needs.build.outputs.toolchain-publish-release == 'true' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     environment: release
     needs:
